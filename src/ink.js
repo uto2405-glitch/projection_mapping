@@ -27,6 +27,9 @@ export function createInk({ canvas = null, width = 1920, height = 1080 } = {}) {
   let dirty = false;
   const fade = { on: false, seconds: 8, permanent: false };
   let blackPresented = false; // 전량 만료 후 검정 프레임을 1회 제시했는지
+  /** drawPending 밖(restoreOpaque·resize)에서 처음 렌더된 획 id — 다음 프레임 마크로 합류.
+   *  미렌더 대기 포인트가 이 경로로 그려져도 레지스트리·렌더 마크가 누락되지 않는다 (감사 2차 #1). */
+  const deferredFirst = [];
 
   paintBackground();
 
@@ -58,6 +61,7 @@ export function createInk({ canvas = null, width = 1920, height = 1080 } = {}) {
       marked: false,
       expired: false,
       done: false,
+      tip: false, // 종료 팁(마지막 반조각) 렌더 여부
       pub: { id, pointsRendered: 0 },
     };
     strokes.set(id, s);
@@ -77,7 +81,9 @@ export function createInk({ canvas = null, width = 1920, height = 1080 } = {}) {
 
   function end(id) {
     const s = strokes.get(id);
-    if (s) s.done = true;
+    if (!s) return;
+    s.done = true;
+    if (!s.tip && s.points.length - s.head >= 2) dirty = true; // 팁 반조각 마감 렌더
   }
 
   function dot(p, s, alpha = 1) {
@@ -89,54 +95,84 @@ export function createInk({ canvas = null, width = 1920, height = 1080 } = {}) {
     ctx.globalAlpha = 1;
   }
 
+  // ─── 스무딩 (ORDER-04, B3) — 입력 폴리라인을 중점 이차곡선으로 렌더 ───
+  // 조각 규약: 시작 p[h]→m(h,h+1) 직선, 이후 m(k-2,k-1) —ctrl p[k-1]→ m(k-1,k) 곡선,
+  // 획 종료 시 m(끝-1,끝)→p[끝] 팁 직선. pointsRendered 의미는 불변(입력 포인트당 1).
+
   /** 증분 렌더 — head(만료 경계) 이전과는 절대 잇지 않는다 */
   function drawStrokeIncrement(s) {
     const pts = s.points;
+    const n = pts.length;
     const w = surface.width;
     const h = surface.height;
+    const px = (a) => pts[a].x * w;
+    const py = (a) => pts[a].y * h;
+    const mx = (a, b) => (px(a) + px(b)) / 2;
+    const my = (a, b) => (py(a) + py(b)) / 2;
     let i = Math.max(s.drawn, s.head);
-    if (i >= pts.length) {
-      s.drawn = pts.length;
+    const wantTip = s.done && !s.tip && n - s.head >= 2 && i >= n;
+    if (i >= n && !wantTip) {
+      s.drawn = n;
       return;
     }
-    if (i === 0) {
-      dot(pts[0], s);
-      i = 1;
-    } else if (i === s.head) {
-      dot(pts[i], s); // 만료 경계에서 재시작 — 소거된 점과 잇지 않는다
+    if (i < n && i === s.head) {
+      dot(pts[i], s); // 시작점(또는 만료 경계 재시작) — 이전과 잇지 않는다
       i += 1;
     }
-    if (i < pts.length) {
+    if (i < n || wantTip) {
+      ctx.globalCompositeOperation = "source-over";
       ctx.strokeStyle = styleFor(s);
       ctx.lineWidth = lineWidthFor(s);
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
       ctx.beginPath();
-      ctx.moveTo(pts[i - 1].x * w, pts[i - 1].y * h);
-      for (; i < pts.length; i++) ctx.lineTo(pts[i].x * w, pts[i].y * h);
+      let moved = false;
+      for (; i < n; i++) {
+        if (i === s.head + 1) {
+          ctx.moveTo(px(i - 1), py(i - 1));
+          ctx.lineTo(mx(i - 1, i), my(i - 1, i));
+          moved = true;
+        } else {
+          if (!moved) {
+            ctx.moveTo(mx(i - 2, i - 1), my(i - 2, i - 1));
+            moved = true;
+          }
+          ctx.quadraticCurveTo(px(i - 1), py(i - 1), mx(i - 1, i), my(i - 1, i));
+        }
+      }
+      if (s.done && !s.tip && n - s.head >= 2) {
+        if (!moved) ctx.moveTo(mx(n - 2, n - 1), my(n - 2, n - 1));
+        ctx.lineTo(px(n - 1), py(n - 1)); // 팁 — 마지막 반조각 마감
+        s.tip = true;
+      }
       ctx.stroke();
     }
-    s.drawn = pts.length;
+    s.drawn = n;
   }
 
-  /** 잔상 렌더 — 살아있는 구간을 알파 감쇠(10버킷)로 그린다 */
+  /** 잔상 렌더 — 살아있는 구간을 알파 감쇠(10버킷)로, 조각별 스무딩 유지 */
   function drawStrokeFade(s, now, cutoffMs) {
     const pts = s.points;
+    const n = pts.length;
     const w = surface.width;
     const h = surface.height;
     const i0 = s.head;
-    if (pts.length - i0 === 1) {
+    if (n - i0 === 1) {
       const a = Math.max(0, 1 - (now - pts[i0].t) / cutoffMs);
       if (a > 0.01) dot(pts[i0], s, a);
       return;
     }
+    const px = (a) => pts[a].x * w;
+    const py = (a) => pts[a].y * h;
+    const mx = (a, b) => (px(a) + px(b)) / 2;
+    const my = (a, b) => (py(a) + py(b)) / 2;
     ctx.strokeStyle = styleFor(s);
     ctx.lineWidth = lineWidthFor(s);
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
-    // 알파 버킷별로 패스를 묶어 stroke() 호출 수를 제한
+    // 알파 버킷별로 패스를 묶어 stroke() 호출 수를 제한 (조각은 독립 moveTo)
     const buckets = new Map();
-    for (let k = i0 + 1; k < pts.length; k++) {
+    for (let k = i0 + 1; k < n; k++) {
       const a = 1 - (now - pts[k].t) / cutoffMs;
       if (a <= 0.01) continue;
       const b = Math.min(10, Math.max(1, Math.ceil(a * 10)));
@@ -148,8 +184,14 @@ export function createInk({ canvas = null, width = 1920, height = 1080 } = {}) {
       ctx.globalAlpha = b / 10;
       ctx.beginPath();
       for (const k of idxs) {
-        ctx.moveTo(pts[k - 1].x * w, pts[k - 1].y * h);
-        ctx.lineTo(pts[k].x * w, pts[k].y * h);
+        if (k === i0 + 1) {
+          ctx.moveTo(px(k - 1), py(k - 1));
+          ctx.lineTo(mx(k - 1, k), my(k - 1, k));
+        } else {
+          ctx.moveTo(mx(k - 2, k - 1), my(k - 2, k - 1));
+          ctx.quadraticCurveTo(px(k - 1), py(k - 1), mx(k - 1, k), my(k - 1, k));
+        }
+        if (k === n - 1 && s.done) ctx.lineTo(px(n - 1), py(n - 1)); // 팁
       }
       ctx.stroke();
     }
@@ -172,7 +214,7 @@ export function createInk({ canvas = null, width = 1920, height = 1080 } = {}) {
 
   function drawFadeFrame() {
     dirty = false; // 대기 포인트 소비 — 이후는 감쇠 진행(fadeBusy)이 틱을 요청한다
-    const first = [];
+    const first = deferredFirst.splice(0);
     const now = performance.now();
     const cutoffMs = fade.seconds * 1000;
     let anyLive = false;
@@ -211,10 +253,12 @@ export function createInk({ canvas = null, width = 1920, height = 1080 } = {}) {
   function drawPending() {
     if (fadeMode()) return drawFadeFrame();
     if (!dirty) return { dirty: false, first: [] };
-    const first = [];
+    const first = deferredFirst.splice(0);
     for (const s of order) {
       if (s.expired) continue;
-      if (Math.max(s.drawn, s.head) < s.points.length) {
+      const hasPts = Math.max(s.drawn, s.head) < s.points.length;
+      const needTip = s.done && !s.tip && s.points.length - s.head >= 2;
+      if (hasPts || needTip) {
         drawStrokeIncrement(s);
         updateEver(s, first);
       }
@@ -241,8 +285,27 @@ export function createInk({ canvas = null, width = 1920, height = 1080 } = {}) {
     for (const s of order) {
       if (s.expired) continue;
       s.drawn = s.head;
+      s.tip = false; // 팁 포함 전체 재드로우
       drawStrokeIncrement(s);
+      updateEver(s, deferredFirst); // 미렌더 대기분도 집계 — 레지스트리·마크 누락 방지
     }
+  }
+
+  /** 획 제거 (실행취소, ORDER-04) — 벡터 재드로우라 지우개 획 취소 시 하부가 복원된다 */
+  function remove(id) {
+    const s = strokes.get(id);
+    if (!s || s.expired) return false;
+    s.expired = true;
+    s.points.length = 0;
+    s.head = 0;
+    s.drawn = 0;
+    const pi = pub.indexOf(s.pub); // 레지스트리에서도 제거 — 실제 렌더 상태 반영(C4)
+    if (pi >= 0) pub.splice(pi, 1);
+    strokes.delete(id);
+    if (!fadeMode()) restoreOpaque();
+    blackPresented = false;
+    dirty = true;
+    return true;
   }
 
   /** 모두 지우기 — 획·레지스트리·픽셀 전체 소거 (Q9: 세션 교체, 영구 잔상 포함) */
@@ -264,7 +327,9 @@ export function createInk({ canvas = null, width = 1920, height = 1080 } = {}) {
       for (const s of order) {
         if (s.expired) continue;
         s.drawn = s.head;
+        s.tip = false;
         drawStrokeIncrement(s);
+        updateEver(s, deferredFirst); // 리사이즈 중 도착한 신규 포인트 집계
       }
     }
     dirty = true;
@@ -295,6 +360,7 @@ export function createInk({ canvas = null, width = 1920, height = 1080 } = {}) {
     begin,
     addPoints,
     end,
+    remove,
     drawPending,
     setFade,
     clear,

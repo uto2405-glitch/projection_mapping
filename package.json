@@ -6,7 +6,8 @@
     "dev": "vite --host --strictPort --port 5173",
     "build": "vite build",
     "preview": "vite preview",
-    "relay": "node relay/relay.mjs"
+    "relay": "node relay/relay.mjs",
+    "field": "vite build && vite preview --host --strictPort --port 5173"
   },
   "dependencies": {
     "qrcode": "^1.5.4",

@@ -202,6 +202,11 @@ export function startOutput(root) {
         ink.end(msg.id);
         strokeMeta.delete(msg.id);
         break;
+      case "undo":
+        ink.remove(msg.id);
+        strokeMeta.delete(msg.id);
+        needRender = true;
+        break;
       case "replay":
         // 출력 (재)부팅 복구 — 이미 온전한 획은 건너뛰고 부족한 획만 대체
         if (Array.isArray(msg.strokes)) {

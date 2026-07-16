@@ -35,6 +35,7 @@ export function startDraw(root) {
           </label>
         </div>
         <div class="tgroup" aria-label="도구">
+          <button type="button" class="tbtn" data-test="undo">↩ 실행취소</button>
           <button type="button" class="tbtn" data-test="tool-eraser" aria-pressed="false">⌫ 지우개</button>
           <button type="button" class="tbtn danger" data-test="clear-all">🗑 모두 지우기</button>
         </div>
@@ -49,11 +50,13 @@ export function startDraw(root) {
         </div>
         <div class="tgroup" aria-label="정렬">
           <button type="button" class="tbtn" data-test="align-mode" aria-pressed="false">◱ 정렬</button>
+          <button type="button" class="tbtn hidden" data-test="align-fine" aria-pressed="false">🎯 미세</button>
           <button type="button" class="tbtn hidden" data-test="align-reset">↺ 리셋</button>
         </div>
         <div class="tgroup" aria-label="내보내기">
           <button type="button" class="tbtn" data-test="export-png">📷 PNG 저장</button>
         </div>
+        <span class="sync-badge" aria-live="polite"></span>
       </div>
       <div class="canvas-wrap">
         <div class="stage">
@@ -81,15 +84,44 @@ export function startDraw(root) {
   const sync = openSync();
   const ink = createInk({ canvas, width: 1920, height: 1080 });
 
-  // ─── 상태 ───
+  // ─── 상태 (ldp:pen에 영구화 — 리로드·재방문 시 이어서, ORDER-04) ───
+  const PEN_KEY = "ldp:pen";
   const state = {
     color: "#ffffff",
     width: 6,
     erase: false,
     fx: { trail: false, glow: false, trailSeconds: 8, trailPermanent: false },
     alignMode: false,
+    alignFine: false,
+  };
+  try {
+    const saved = JSON.parse(localStorage.getItem(PEN_KEY) || "null");
+    if (saved && typeof saved === "object") {
+      if (typeof saved.color === "string" && /^#[0-9a-f]{6}$/i.test(saved.color)) state.color = saved.color;
+      if (isFinite(saved.width)) state.width = Math.min(40, Math.max(1, +saved.width));
+      if (saved.fx && typeof saved.fx === "object") {
+        state.fx.trail = !!saved.fx.trail;
+        state.fx.glow = !!saved.fx.glow;
+        state.fx.trailPermanent = !!saved.fx.trailPermanent;
+        if (isFinite(saved.fx.trailSeconds))
+          state.fx.trailSeconds = Math.min(30, Math.max(2, +saved.fx.trailSeconds));
+      }
+    }
+  } catch {
+    /* 손상 저장값 무시 */
+  }
+  const persist = () => {
+    try {
+      localStorage.setItem(
+        PEN_KEY,
+        JSON.stringify({ color: state.color, width: state.width, fx: state.fx })
+      );
+    } catch {
+      /* 저장 불가 환경 — 무시 */
+    }
   };
   let corners = IDENTITY_CORNERS.slice(); // 마지막으로 알려진 출력 코너 (정렬 UI용)
+  const undoStack = []; // 이 기기에서 그린 획 id (per-client 실행취소)
 
   // 획 ID — 채점기가 시나리오 id(s000…)와 레지스트리를 교차대조하므로 이 형식을 유지한다.
   // 리로드 시 재발급 충돌은 출력 ink.begin의 대체 방어가 흡수한다.
@@ -141,6 +173,8 @@ export function startDraw(root) {
     if (!active) return;
     ink.end(active.id);
     sync.send({ t: "e", id: active.id });
+    undoStack.push(active.id);
+    if (undoStack.length > 100) undoStack.shift();
     active = null;
   }
 
@@ -195,6 +229,7 @@ export function startDraw(root) {
   // ─── 툴바 ───
   const colorInput = root.querySelector('[data-test="pen-color"]');
   const widthInput = root.querySelector('[data-test="pen-width"]');
+  const undoBtn = root.querySelector('[data-test="undo"]');
   const eraserBtn = root.querySelector('[data-test="tool-eraser"]');
   const clearBtn = root.querySelector('[data-test="clear-all"]');
   const glowBtn = root.querySelector('[data-test="toggle-glow"]');
@@ -203,8 +238,10 @@ export function startDraw(root) {
   const trailSecsValue = root.querySelector(".trail-secs-value");
   const permBtn = root.querySelector('[data-test="trail-permanent"]');
   const alignBtn = root.querySelector('[data-test="align-mode"]');
+  const alignFineBtn = root.querySelector('[data-test="align-fine"]');
   const alignResetBtn = root.querySelector('[data-test="align-reset"]');
   const exportBtn = root.querySelector('[data-test="export-png"]');
+  const syncBadge = root.querySelector(".sync-badge");
 
   function setEraser(on) {
     state.erase = on;
@@ -217,20 +254,31 @@ export function startDraw(root) {
       colorInput.value = sw.dataset.color;
       setEraser(false);
       root.querySelectorAll(".swatch").forEach((b) => b.classList.toggle("active", b === sw));
+      persist();
     });
   }
   colorInput.addEventListener("input", () => {
     state.color = colorInput.value;
     setEraser(false);
     root.querySelectorAll(".swatch").forEach((b) => b.classList.remove("active"));
+    persist();
   });
   widthInput.addEventListener("input", () => {
     state.width = +widthInput.value;
+    persist();
   });
   eraserBtn.addEventListener("click", () => setEraser(!state.erase));
 
+  undoBtn.addEventListener("click", () => {
+    const id = undoStack.pop();
+    if (!id) return;
+    ink.remove(id);
+    sync.send({ t: "undo", id });
+  });
+
   clearBtn.addEventListener("click", () => {
     ink.clear();
+    undoStack.length = 0;
     sync.send({ t: "clear" });
   });
 
@@ -242,6 +290,7 @@ export function startDraw(root) {
       btn.setAttribute("aria-pressed", String(state.fx[key]));
       applyFxLocal();
       sendFx();
+      persist();
     });
   };
   bindToggle(glowBtn, "glow");
@@ -252,7 +301,30 @@ export function startDraw(root) {
     trailSecsValue.textContent = trailSecs.value + "s";
     applyFxLocal();
     sendFx();
+    persist();
   });
+
+  // 영구화된 상태를 UI에 반영 (리로드 복원)
+  colorInput.value = state.color;
+  widthInput.value = String(state.width);
+  root.querySelectorAll(".swatch").forEach((b) =>
+    b.classList.toggle("active", b.dataset.color?.toLowerCase() === state.color.toLowerCase())
+  );
+  glowBtn.setAttribute("aria-pressed", String(state.fx.glow));
+  trailBtn.setAttribute("aria-pressed", String(state.fx.trail));
+  permBtn.setAttribute("aria-pressed", String(state.fx.trailPermanent));
+  trailSecs.value = String(state.fx.trailSeconds);
+  trailSecsValue.textContent = state.fx.trailSeconds + "s";
+  applyFxLocal();
+
+  // ─── 동기화 상태 배지 — 현장 진단 (ORDER-04) ───
+  const setBadge = (mode) => {
+    syncBadge.textContent = mode === "ws" ? "📡 릴레이 연결됨" : sync.isLocal ? "🖥 책상 모드" : "⏳ 릴레이 연결 중…";
+    syncBadge.dataset.state = mode === "ws" ? "ws" : sync.isLocal ? "local" : "wait";
+  };
+  setBadge("init");
+  sync.onUp(() => setBadge("ws"));
+  sync.onDown(() => setBadge("down"));
 
   // ─── 정렬 모드 (Q7 — 아이패드 원격 4코너) ───
   const handles = [...root.querySelectorAll(".align-handle")];
@@ -282,11 +354,17 @@ export function startDraw(root) {
     state.alignMode = !state.alignMode;
     alignBtn.setAttribute("aria-pressed", String(state.alignMode));
     overlay.classList.toggle("hidden", !state.alignMode);
+    alignFineBtn.classList.toggle("hidden", !state.alignMode);
     alignResetBtn.classList.toggle("hidden", !state.alignMode);
     if (state.alignMode) {
       sync.send({ t: "corners-req" }); // 현재 출력 코너를 받아 핸들 초기화
       renderAlignUi();
     }
+  });
+
+  alignFineBtn.addEventListener("click", () => {
+    state.alignFine = !state.alignFine;
+    alignFineBtn.setAttribute("aria-pressed", String(state.alignFine));
   });
 
   alignResetBtn.addEventListener("click", () => {
@@ -295,10 +373,14 @@ export function startDraw(root) {
     sendCorners();
   });
 
+  // 상대 드래그 — 잡는 순간 점프 없음. 미세 모드는 이동량 ×0.25 (마지막 1cm용, B4)
+  // 포인터 ID 대조 — 드래그 중 손바닥 개입이 기준점을 탈취하지 못하게 (감사 2차 #6)
   handles.forEach((el, k) => {
-    let dragging = false;
+    let ref = null; // { pid, px, py, cx, cy }
     el.addEventListener("pointerdown", (e) => {
-      dragging = true;
+      if (ref) return; // 진행 중 드래그 보호 — 두 번째 포인터(팜) 무시
+      if (e.pointerType === "touch" && performance.now() - lastPenAt < 1500) return;
+      ref = { pid: e.pointerId, px: e.clientX, py: e.clientY, cx: corners[k * 2], cy: corners[k * 2 + 1] };
       e.preventDefault();
       e.stopPropagation();
       try {
@@ -308,15 +390,24 @@ export function startDraw(root) {
       }
     });
     el.addEventListener("pointermove", (e) => {
-      if (!dragging) return;
+      if (!ref || e.pointerId !== ref.pid) return;
       e.preventDefault();
       const r = stage.getBoundingClientRect();
-      corners[k * 2] = Math.min(1, Math.max(0, (e.clientX - r.left) / Math.max(1, r.width)));
-      corners[k * 2 + 1] = Math.min(1, Math.max(0, (e.clientY - r.top) / Math.max(1, r.height)));
+      const scale = state.alignFine ? 0.25 : 1;
+      corners[k * 2] = Math.min(
+        1,
+        Math.max(0, ref.cx + ((e.clientX - ref.px) / Math.max(1, r.width)) * scale)
+      );
+      corners[k * 2 + 1] = Math.min(
+        1,
+        Math.max(0, ref.cy + ((e.clientY - ref.py) / Math.max(1, r.height)) * scale)
+      );
       renderAlignUi();
       sendCorners();
     });
-    const stop = () => (dragging = false);
+    const stop = (e) => {
+      if (ref && e.pointerId === ref.pid) ref = null;
+    };
     el.addEventListener("pointerup", stop);
     el.addEventListener("pointercancel", stop);
   });
@@ -353,7 +444,7 @@ export function startDraw(root) {
     }
   });
   sync.onUp(announce); // ws 재연결 — 두 기기 모드 복구
-  sync.send({ t: "hello", role: "draw" });
+  announce(); // 부팅 — hello + 복원된 연출 상태 + 획 리플레이 (먼저 떠 있는 출력과 정합, 감사 2차 #2)
 
   // ─── 로컬 미리보기 렌더 루프 — 새 잉크 즉시, 잔상 감쇠 틱은 30Hz (출력과 동일 정책) ───
   let frameNo = 0;

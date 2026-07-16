@@ -172,13 +172,12 @@ export function createFx({ renderer, inkTexture }) {
     renderer.render(blurScene, camera);
   };
 
-  /** 잉크가 변한 프레임에 호출 (격프레임 스로틀) — 2단계(심지+넓은 번짐) 글로우 → rtB.
-   *  전 패스가 320×180이라 총 래스터가 제시 패스의 1/3 이하. 저주파 성분이라
-   *  격프레임·저해상은 지각 불가, 앵커의 '부드럽게 번지는 발광'이 목표다. */
-  let glowTick = 0;
+  /** 잉크가 변한 프레임에 호출 — 2단계(심지+넓은 번짐) 글로우 → rtA.
+   *  전 패스가 320×180이라 총 래스터가 제시 패스의 1/3 이하. 호출 빈도는 출력의
+   *  적응형 애니메이션 틱이 이미 제어하므로 자체 스로틀은 두지 않는다 —
+   *  단발 갱신(undo·clear·만료 검정 프레임)이 스킵되면 글로우 잔상이 남는다 (감사 2차 #5). */
   function updateGlow() {
     if (!glowOn) return;
-    if (glowTick++ % 2) return; // 격프레임 갱신
     renderer.setRenderTarget(rtB);
     renderer.render(copyScene, camera); // 잉크 다운샘플 → rtB
     blurPass(rtB, rtA, 1.4, true); // H

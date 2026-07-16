@@ -154,6 +154,19 @@ input[type="range"] {
   color: #ffb0a8;
 }
 
+.sync-badge {
+  margin-left: auto;
+  font-size: 0.75rem;
+  color: #7a7f8a;
+  white-space: nowrap;
+}
+.sync-badge[data-state="ws"] {
+  color: #9fe0b0;
+}
+.sync-badge[data-state="wait"] {
+  color: #e6c98a;
+}
+
 .canvas-wrap {
   flex: 1;
   min-height: 0;

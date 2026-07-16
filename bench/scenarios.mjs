@@ -409,6 +409,115 @@ SC.S12 = async () => {
   await ctx.close();
 };
 
+// ─── S13 실행취소 — 마지막 획 취소 + 지우개 취소 시 하부 복원 ───
+SC.S13 = async () => {
+  const { ctx, draw, out, errors } = await setup();
+  await fireStroke(draw, line(0.2, 0.3, 0.8, 0.3)); // A
+  await click(draw, "tool-eraser");
+  await setSlider(draw, "pen-width", 30);
+  await fireStroke(draw, line(0.5, 0.15, 0.5, 0.45)); // B: A를 가로지르는 지우개
+  await out.waitForTimeout(350);
+  const cut = lum(await shot(out), 0.5, 0.3) < 12; // 지워짐
+  await click(draw, "undo"); // 지우개 취소 → A 복원
+  await out.waitForTimeout(350);
+  const restored = lum(await shot(out), 0.5, 0.3) > 40;
+  await click(draw, "undo"); // A 취소 → 빈 화면
+  await out.waitForTimeout(350);
+  const png = await shot(out);
+  const reg = await out.evaluate(() => window.__ldp.strokes.length);
+  const empty = lum(png, 0.5, 0.3) < 6 && reg === 0;
+  report("S13", "실행취소 (지우개 복원 포함)", cut && restored && empty, `소거=${cut} 복원=${restored} 전취소=${empty} reg=${reg}`, errors);
+  await ctx.close();
+};
+
+// ─── S14 펜·연출 설정 영구화 — 리로드 복원 ───
+SC.S14 = async () => {
+  const { ctx, draw, out, errors } = await setup();
+  await draw.evaluate(() => {
+    const el = document.querySelector('[data-test="pen-color"]');
+    el.value = "#4488ff";
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await setSlider(draw, "pen-width", 22);
+  await click(draw, "toggle-glow");
+  await click(draw, "toggle-trail");
+  await setSlider(draw, "trail-seconds", 15);
+  await draw.reload({ waitUntil: "domcontentloaded" });
+  await draw.waitForTimeout(400);
+  const st = await draw.evaluate(() => ({
+    color: document.querySelector('[data-test="pen-color"]').value,
+    width: document.querySelector('[data-test="pen-width"]').value,
+    glow: document.querySelector('[data-test="toggle-glow"]').getAttribute("aria-pressed"),
+    trail: document.querySelector('[data-test="toggle-trail"]').getAttribute("aria-pressed"),
+    secs: document.querySelector('[data-test="trail-seconds"]').value,
+  }));
+  const ok = st.color === "#4488ff" && st.width === "22" && st.glow === "true" && st.trail === "true" && st.secs === "15";
+  report("S14", "설정 영구화 (리로드 복원)", ok, JSON.stringify(st), errors);
+  await ctx.close();
+};
+
+// ─── S15 획 스무딩 — 예각 입력이 이차곡선으로 잘리는지 기하 검증 ───
+SC.S15 = async () => {
+  const { ctx, draw, out, errors } = await setup();
+  // 3점 예각: (0.3,0.8) → 꼭짓점 (0.5,0.2) → (0.7,0.8)
+  await fireStroke(draw, [
+    [0.3, 0.8],
+    [0.5, 0.2],
+    [0.7, 0.8],
+  ]);
+  await out.waitForTimeout(400);
+  const png = await shot(out);
+  // 이차곡선 정점: 0.25·m01 + 0.5·p1 + 0.25·m12 = (0.5, 0.35)
+  const atCurve = lumMax(png, 0.5, 0.35, 6) > 40;
+  const inputApexCut = lum(png, 0.5, 0.2) < 12; // 입력 꼭짓점은 잘림 (스무딩 증거)
+  const tipDrawn = lumMax(png, 0.7, 0.8, 6) > 40; // 종료 팁 마감
+  const startDrawn = lumMax(png, 0.3, 0.8, 6) > 40;
+  await out.screenshot({ path: "bench/shots/7-smooth.png" });
+  report("S15", "획 스무딩 (예각 절단·팁 마감)", atCurve && inputApexCut && tipDrawn && startDrawn, `곡선정점=${atCurve} 꼭짓점절단=${inputApexCut} 팁=${tipDrawn} 시작=${startDrawn}`, errors);
+  await ctx.close();
+};
+
+// ─── S16 릴레이 단절 중 실행취소 — 재접속 시 큐 플러시로 출력 보정 ───
+SC.S16 = async () => {
+  const ip = Object.values(os.networkInterfaces())
+    .flat()
+    .find((i) => i && i.family === "IPv4" && !i.internal && !i.address.startsWith("169.254"))?.address;
+  if (!ip) return report("S16", "단절 중 undo 보정", true, "SKIP — LAN 없음");
+  const relay = () => spawn("node", ["relay/relay.mjs"], { stdio: "ignore" });
+  let r = relay();
+  await new Promise((s) => setTimeout(s, 1200));
+  const b2 = await chromium.launch();
+  const drawCtx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const outCtx = await b2.newContext({ viewport: { width: 1280, height: 800 } });
+  const errors = [];
+  const draw = await drawCtx.newPage();
+  const out = await outCtx.newPage();
+  out.on("console", (m) => {
+    if (m.type() === "error") errors.push("out console: " + m.text());
+  });
+  await draw.goto(`http://${ip}:5173/?role=draw`, { waitUntil: "domcontentloaded" });
+  await out.goto(`http://${ip}:5173/?role=output`, { waitUntil: "domcontentloaded" });
+  await draw.waitForTimeout(1500);
+  await fireStroke(draw, line(0.2, 0.3, 0.6, 0.3)); // s000
+  await fireStroke(draw, line(0.2, 0.6, 0.6, 0.6)); // s001
+  await out.waitForTimeout(800);
+  const before = await out.evaluate(() => window.__ldp.strokes.length);
+  r.kill(); // 단절
+  await new Promise((s) => setTimeout(s, 800));
+  await click(draw, "undo"); // s001 취소 — ws 유실 → 큐잉돼야 함
+  await new Promise((s) => setTimeout(s, 400));
+  r = relay(); // 부활
+  await out.waitForTimeout(9000); // 재접속 + 큐 플러시 + announce
+  const reg = await out.evaluate(() => window.__ldp.strokes.map((s) => s.id));
+  const png = await shot(out);
+  const removed = !reg.includes("s001") && lum(png, 0.4, 0.6) < 12;
+  const kept = reg.includes("s000") && lum(png, 0.4, 0.3) > 40;
+  report("S16", "단절 중 undo 재접속 보정", before === 2 && removed && kept, `이전=${before} 이후=[${reg}] 제거=${removed} 보존=${kept}`, errors);
+  r.kill();
+  await drawCtx.close();
+  await b2.close();
+};
+
 // ─── 실행 ───
 for (const [id, fn] of Object.entries(SC)) {
   if (only && !only.includes(id)) continue;

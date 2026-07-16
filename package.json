@@ -5,12 +5,16 @@
   "scripts": {
     "dev": "vite --host --strictPort --port 5173",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "relay": "node relay/relay.mjs"
   },
   "dependencies": {
-    "three": "^0.185.1"
+    "qrcode": "^1.5.4",
+    "three": "^0.185.1",
+    "ws": "^8.21.1"
   },
   "devDependencies": {
+    "playwright": "^1.61.1",
     "vite": "^8.1.5"
   }
 }

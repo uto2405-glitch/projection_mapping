@@ -64,7 +64,9 @@ body {
   flex-wrap: wrap;
   align-items: center;
   gap: 10px 18px;
-  padding: 10px 14px;
+  /* 홈 화면 앱 모드에서 상태바·노치 침범 방지 */
+  padding: max(10px, env(safe-area-inset-top)) max(14px, env(safe-area-inset-right)) 10px
+    max(14px, env(safe-area-inset-left));
   background: #101014;
   border-bottom: 1px solid #26262c;
   user-select: none;
@@ -189,8 +191,14 @@ input[type="range"] {
   touch-action: none;
   -webkit-user-select: none;
   user-select: none;
+  -webkit-touch-callout: none;
   cursor: crosshair;
   background: #000;
+}
+.stage .predict-overlay {
+  pointer-events: none;
+  background: transparent;
+  z-index: 2;
 }
 
 .hidden {

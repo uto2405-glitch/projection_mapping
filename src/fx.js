@@ -173,11 +173,12 @@ export function createFx({ renderer, inkTexture }) {
   };
 
   /** 잉크가 변한 프레임에 호출 — 2단계(심지+넓은 번짐) 글로우 → rtA.
-   *  전 패스가 320×180이라 총 래스터가 제시 패스의 1/3 이하. 호출 빈도는 출력의
-   *  적응형 애니메이션 틱이 이미 제어하므로 자체 스로틀은 두지 않는다 —
-   *  단발 갱신(undo·clear·만료 검정 프레임)이 스킵되면 글로우 잔상이 남는다 (감사 2차 #5). */
-  function updateGlow() {
+   *  연속 틱(잔상 감쇠)은 격틱으로 아껴 쓰되, force=단발 갱신(undo·clear·연출 전환·
+   *  만료 검정 프레임)은 반드시 재계산 — 스킵되면 글로우 잔상이 남는다 (감사 2차 #5). */
+  let glowTick = 0;
+  function updateGlow(force = false) {
     if (!glowOn) return;
+    if (!force && glowTick++ % 2) return;
     renderer.setRenderTarget(rtB);
     renderer.render(copyScene, camera); // 잉크 다운샘플 → rtB
     blurPass(rtB, rtA, 1.4, true); // H

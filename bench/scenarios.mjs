@@ -518,6 +518,85 @@ SC.S16 = async () => {
   await b2.close();
 };
 
+// ─── S17 소크 — 90초 연속 부하 (30분 드리프트 승격 예행: fps·메모리·정합) ───
+SC.S17 = async () => {
+  const { ctx, draw, out, errors } = await setup();
+  for (const t of ["toggle-trail", "toggle-glow"]) await click(draw, t);
+  await out.evaluate(() => {
+    window.__f = 0;
+    const loop = () => {
+      window.__f++;
+      requestAnimationFrame(loop);
+    };
+    requestAnimationFrame(loop);
+  });
+  const heap0 = await out.evaluate(() => performance.memory?.usedJSHeapSize ?? 0);
+  const t0 = Date.now();
+  let k = 0;
+  while (Date.now() - t0 < 90_000) {
+    await fireStroke(
+      draw,
+      line(0.1 + (k % 8) * 0.1, 0.2 + (k % 5) * 0.15, 0.15 + (k % 8) * 0.1, 0.25 + (k % 5) * 0.15, 30)
+    );
+    k++;
+    const target = k * 333;
+    const wait = target - (Date.now() - t0);
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  }
+  const secs = (Date.now() - t0) / 1000;
+  const frames = await out.evaluate(() => window.__f);
+  const heap1 = await out.evaluate(() => performance.memory?.usedJSHeapSize ?? 0);
+  const fps = frames / secs;
+  const heapMB = (heap1 - heap0) / 1048576;
+  const reg = await out.evaluate(() => window.__ldp.strokes.length);
+  report(
+    "S17",
+    "소크 90초 (fps·힙·정합)",
+    fps >= 50 && heapMB < 60 && reg === k,
+    `fps=${fps.toFixed(1)} 힙증가=${heapMB.toFixed(1)}MB 획=${reg}/${k}`,
+    errors
+  );
+  await ctx.close();
+};
+
+// ─── S18 퍼즈 — 악성·불완전 메시지 내성 (A4 방어선) ───
+SC.S18 = async () => {
+  const { ctx, draw, out, errors } = await setup();
+  await out.evaluate(() => {
+    const bc = new BroadcastChannel("ldp-sync");
+    const junk = [
+      null,
+      42,
+      "문자열",
+      {},
+      { t: "s" }, // id·메타 없음
+      { t: "s", id: "sZZZ", p: "포인트아님" },
+      { t: "a", id: "없는획", p: [{ x: NaN, y: Infinity }] },
+      { t: "a", id: null, p: [null, { x: 0.5 }] },
+      { t: "e" },
+      { t: "undo", id: 12345 },
+      { t: "fx", fx: "객체아님" },
+      { t: "fx", fx: { trailSeconds: "abc", trail: 1 } },
+      { t: "corners", v: [1, 2, 3] },
+      { t: "corners", v: ["a", "b", "c", "d", "e", "f", "g", "h"] },
+      { t: "replay", strokes: "배열아님" },
+      { t: "replay", strokes: [null, { id: "sQ" }, { id: "sW", points: "x" }] },
+      { t: "알수없는타입", data: { deep: { deep: 1 } } },
+    ];
+    let n = 100;
+    for (const j of junk) bc.postMessage(j && typeof j === "object" ? { ...j, _sid: "fz", _n: n++ } : j);
+  });
+  await out.waitForTimeout(600);
+  // 오염 후에도 정상 획이 그려져야 한다
+  await fireStroke(draw, line(0.2, 0.5, 0.8, 0.5));
+  await out.waitForTimeout(400);
+  const png = await shot(out);
+  const alive = lum(png, 0.5, 0.5) > 40;
+  const reg = await out.evaluate(() => window.__ldp.strokes.length);
+  report("S18", "퍼즈 내성 (17종 악성 메시지)", alive && reg >= 1, `생존=${alive} reg=${reg}`, errors);
+  await ctx.close();
+};
+
 // ─── 실행 ───
 for (const [id, fn] of Object.entries(SC)) {
   if (only && !only.includes(id)) continue;

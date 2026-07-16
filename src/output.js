@@ -206,6 +206,7 @@ export function startOutput(root) {
         ink.remove(msg.id);
         strokeMeta.delete(msg.id);
         needRender = true;
+        glowForce = true;
         break;
       case "replay":
         // 출력 (재)부팅 복구 — 이미 온전한 획은 건너뛰고 부족한 획만 대체
@@ -224,6 +225,7 @@ export function startOutput(root) {
         ink.clear();
         strokeMeta.clear();
         needRender = true;
+        glowForce = true;
         break;
       case "fx":
         Object.assign(effects, msg.fx);
@@ -231,6 +233,7 @@ export function startOutput(root) {
         warpMat.uniforms.uGlowOn.value = effects.glow ? 1 : 0;
         ink.setFade(effects);
         needRender = true;
+        glowForce = true;
         break;
       case "hello":
         drawActivity();
@@ -260,10 +263,12 @@ export function startOutput(root) {
   navigator.wakeLock?.request("screen").catch(() => {});
 
   // ─── 렌더 루프 — 변화가 있을 때만 합성·제시 (유휴 프레임 비용 0) ───
+  let glowForce = false; // 단발 상태 변화(undo·clear·fx·리플레이)는 글로우 강제 재계산
   function present(t, inkChanged) {
     if (inkChanged) {
       inkTexture.needsUpdate = true;
-      fx.updateGlow(); // 글로우는 잉크가 변한 프레임에만 재계산
+      fx.updateGlow(glowForce); // 글로우는 잉크가 변한 프레임에만 재계산
+      glowForce = false;
     }
     fx.setTime(t);
     renderer.setRenderTarget(null);

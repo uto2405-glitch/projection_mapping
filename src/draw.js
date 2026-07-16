@@ -61,6 +61,7 @@ export function startDraw(root) {
       <div class="canvas-wrap">
         <div class="stage">
           <canvas data-test="draw-canvas"></canvas>
+          <canvas class="predict-overlay" aria-hidden="true"></canvas>
           <div class="align-overlay hidden">
             <svg viewBox="0 0 100 100" preserveAspectRatio="none">
               <polygon class="align-poly" points="" />
@@ -77,6 +78,8 @@ export function startDraw(root) {
     </div>`;
 
   const canvas = root.querySelector('[data-test="draw-canvas"]');
+  const predictCanvas = root.querySelector(".predict-overlay");
+  const predictCtx = predictCanvas.getContext("2d");
   const wrap = root.querySelector(".canvas-wrap");
   const stage = root.querySelector(".stage");
   const overlay = root.querySelector(".align-overlay");
@@ -138,6 +141,8 @@ export function startDraw(root) {
     stage.style.height = stageH + "px";
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     ink.resize(stageW * dpr, stageH * dpr);
+    predictCanvas.width = Math.max(1, Math.round(stageW * dpr));
+    predictCanvas.height = Math.max(1, Math.round(stageH * dpr));
   }
   sizeCanvas();
   window.addEventListener("resize", sizeCanvas);
@@ -168,6 +173,10 @@ export function startDraw(root) {
 
   let active = null; // { id, pointerId, type }
   let lastPenAt = -1e9;
+  // 예측 꼬리 (B1 체감 지연 제거) — 브라우저의 포인터 예측점을 반투명으로 선행 표시.
+  // 다음 프레임마다 지워지는 오버레이라 실제 잉크·내보내기(A7)에는 절대 섞이지 않는다.
+  let predicted = [];
+  let lastReal = null;
 
   function finishStroke() {
     if (!active) return;
@@ -176,6 +185,8 @@ export function startDraw(root) {
     undoStack.push(active.id);
     if (undoStack.length > 100) undoStack.shift();
     active = null;
+    predicted = [];
+    lastReal = null;
   }
 
   canvas.addEventListener("pointerdown", (e) => {
@@ -200,8 +211,15 @@ export function startDraw(root) {
     const p = norm(e);
     ink.begin(id, meta);
     ink.addPoints(id, [p]);
+    lastReal = p;
     sync.send({ t: "s", id, ...meta, p: [p] });
+    syncDraw();
   });
+
+  // 새 잉크 즉시 커밋 — rAF 대기(~8ms) 없이 그 자리에서 그린다 (잔상 재드로우 모드 제외)
+  const syncDraw = () => {
+    if (!(state.fx.trail && !state.fx.trailPermanent)) ink.drawPending();
+  };
 
   canvas.addEventListener("pointermove", (e) => {
     if (!active || e.pointerId !== active.pointerId) return;
@@ -214,7 +232,11 @@ export function startDraw(root) {
         : [e];
     const pts = evs.map(norm);
     ink.addPoints(active.id, pts);
+    lastReal = pts[pts.length - 1];
     sync.send({ t: "a", id: active.id, p: pts });
+    syncDraw();
+    predicted =
+      typeof e.getPredictedEvents === "function" ? e.getPredictedEvents().map(norm) : [];
   });
 
   const onUp = (e) => {
@@ -446,11 +468,35 @@ export function startDraw(root) {
   sync.onUp(announce); // ws 재연결 — 두 기기 모드 복구
   announce(); // 부팅 — hello + 복원된 연출 상태 + 획 리플레이 (먼저 떠 있는 출력과 정합, 감사 2차 #2)
 
+  // ─── 예측 꼬리 렌더 — 매 프레임 지우고 다시 그리는 반투명 선행선 ───
+  let overlayDirty = false;
+  function renderPredict() {
+    if (overlayDirty) {
+      predictCtx.clearRect(0, 0, predictCanvas.width, predictCanvas.height);
+      overlayDirty = false;
+    }
+    if (!active || !lastReal || !predicted.length || state.erase) return;
+    const w = predictCanvas.width;
+    const h = predictCanvas.height;
+    predictCtx.globalAlpha = 0.45;
+    predictCtx.strokeStyle = state.color;
+    predictCtx.lineWidth = Math.max(0.5, state.width * (h / 1080));
+    predictCtx.lineCap = "round";
+    predictCtx.lineJoin = "round";
+    predictCtx.beginPath();
+    predictCtx.moveTo(lastReal.x * w, lastReal.y * h);
+    for (const p of predicted) predictCtx.lineTo(p.x * w, p.y * h);
+    predictCtx.stroke();
+    predictCtx.globalAlpha = 1;
+    overlayDirty = true;
+  }
+
   // ─── 로컬 미리보기 렌더 루프 — 새 잉크 즉시, 잔상 감쇠 틱은 30Hz (출력과 동일 정책) ───
   let frameNo = 0;
   (function frame() {
     frameNo++;
     if (ink.hasNew() || (ink.fadeBusy() && frameNo % 2 === 0)) ink.drawPending();
+    renderPredict();
     requestAnimationFrame(frame);
   })();
 }

@@ -231,12 +231,30 @@ export function startDraw(root) {
         ? e.getCoalescedEvents()
         : [e];
     const pts = evs.map(norm);
+    const prev = pts.length >= 2 ? pts[pts.length - 2] : lastReal;
     ink.addPoints(active.id, pts);
     lastReal = pts[pts.length - 1];
     sync.send({ t: "a", id: active.id, p: pts });
     syncDraw();
-    predicted =
-      typeof e.getPredictedEvents === "function" ? e.getPredictedEvents().map(norm) : [];
+    const native =
+      typeof e.getPredictedEvents === "function" ? e.getPredictedEvents() : [];
+    if (native.length) {
+      predicted = native.map(norm);
+    } else if (prev) {
+      // 사파리 폴백 — 브라우저 예측점이 없으면 최근 속도로 선형 외삽 (~1프레임 선행)
+      const dx = lastReal.x - prev.x;
+      const dy = lastReal.y - prev.y;
+      const v = Math.hypot(dx, dy);
+      predicted =
+        v > 0.0005 && v < 0.05
+          ? [0.6, 1.2].map((k) => ({
+              x: Math.min(1, Math.max(0, lastReal.x + dx * k)),
+              y: Math.min(1, Math.max(0, lastReal.y + dy * k)),
+            }))
+          : [];
+    } else {
+      predicted = [];
+    }
   });
 
   const onUp = (e) => {

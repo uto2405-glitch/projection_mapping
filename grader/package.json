@@ -1,0 +1,13 @@
+{
+  "name": "ldp-grader",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "grade": "node grade.mjs",
+    "grade:quick": "node grade.mjs --quick"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0",
+    "pngjs": "^7.0.0"
+  }
+}

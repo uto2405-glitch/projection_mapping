@@ -265,10 +265,12 @@ export function startOutput(root) {
     renderer.render(presentScene, camera);
   }
 
-  // 새 잉크는 즉시 제시(지연 불변), 잔상 감쇠·반짝임 애니메이션 틱은 30Hz —
-  // 소프트웨어 GL에서도 rAF 서비스(60Hz)를 지키는 sim/render 분리. 감쇠는
-  // 저주파 변화라 30Hz 갱신이 지각 불가, 실기기 GPU에서는 여유가 늘 뿐이다.
-  const ANIM_DIV = 3;
+  // 새 잉크는 즉시 제시(지연 불변), 잔상 감쇠·반짝임 애니메이션 틱은 적응형 —
+  // 실측 rAF 간격으로 기기 여력을 추정해 30Hz(여유)~15Hz(소프트웨어 GL) 사이를
+  // 오간다. 감쇠·트윙클은 저주파 변화라 지각 손실 없이 rAF 서비스(A3)를 지킨다.
+  let animDiv = 4; // 비관적 시작 — 빠른 기기임이 증명되면 완화
+  let emaGap = 22; // 바쁜 구간 rAF 간격의 지수평균(ms)
+  let lastFrameAt = 0;
   let frameNo = 0;
   function frame() {
     const P = window.__ldpPerf; // 개발용 프레임 계측 (벤치에서만 활성)
@@ -276,7 +278,14 @@ export function startOutput(root) {
     const t = nowSec();
     frameNo++;
     const animBusy = ink.fadeBusy() || fx.sparklesAlive(t);
-    if (ink.hasNew() || needRender || (animBusy && frameNo % ANIM_DIV === 0)) {
+    if (animBusy && lastFrameAt) {
+      const gap = (t - lastFrameAt) * 1000;
+      // 비대칭 EMA — 느려짐엔 즉각 반응, 빨라짐은 천천히 신뢰 (rAF 서비스 보호 우선)
+      if (gap < 200) emaGap = gap > emaGap ? emaGap * 0.8 + gap * 0.2 : emaGap * 0.97 + gap * 0.03;
+      animDiv = emaGap > 18.5 ? 4 : emaGap > 17.0 ? 3 : 2;
+    }
+    lastFrameAt = t;
+    if (ink.hasNew() || needRender || (animBusy && frameNo % animDiv === 0)) {
       const p1 = P ? performance.now() : 0;
       const res = ink.drawPending();
       const p2 = P ? performance.now() : 0;

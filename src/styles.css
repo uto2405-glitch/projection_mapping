@@ -50,6 +50,22 @@ body {
 .role-link:hover {
   border-color: #888;
 }
+.role-link.sim {
+  padding: 12px 18px;
+  font-size: 0.95rem;
+}
+.landing-sub {
+  margin-top: 26px;
+  color: #9aa;
+  font-size: 0.9rem;
+}
+.landing-hint {
+  color: #667;
+  font-size: 0.78rem;
+  max-width: 480px;
+  text-align: center;
+  line-height: 1.5;
+}
 
 /* ─── 드로잉 페이지 ─── */
 .draw-page {
@@ -247,6 +263,29 @@ input[type="range"] {
   cursor: grabbing;
   background: rgba(255, 209, 234, 0.35);
 }
+.align-handle.small {
+  width: 34px;
+  height: 34px;
+  margin: -17px 0 0 -17px;
+  font-size: 0.7rem;
+}
+.align-grid-lines polyline {
+  fill: none;
+  stroke: #ffd1ea;
+  stroke-width: 0.28;
+  stroke-dasharray: 1.2 1;
+  vector-effect: non-scaling-stroke;
+  opacity: 0.75;
+}
+.grid-sizes {
+  display: flex;
+  gap: 4px;
+}
+.gbtn {
+  padding: 7px 10px;
+  font-size: 0.8rem;
+  min-height: 34px;
+}
 
 /* ─── 출력 페이지 ─── */
 .output-page {
@@ -264,6 +303,24 @@ input[type="range"] {
   display: block;
   background: #000;
   cursor: none;
+  position: relative;
+  z-index: 1;
+}
+
+/* ─── 가상 표면 시뮬레이터 — 프로젝터의 가산 광학 재현 ───
+   .output-page canvas 규칙(특이도 0,1,1)을 이기도록 클래스 결합(0,2,0) */
+.output-page canvas.sim-surface {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  object-fit: contain; /* 480×270(16:9) → 출력 레터박스와 동일 정합 */
+  z-index: 0;
+  mix-blend-mode: normal;
+}
+.output-page canvas.sim-blend {
+  mix-blend-mode: screen; /* 검정 = 빛 없음 — 표면이 비쳐 보인다 */
+  background: transparent;
 }
 
 /* ─── QR 접속 배지 (현장 전용 — 드로잉 활동 중엔 숨김) ─── */

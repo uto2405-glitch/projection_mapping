@@ -5,6 +5,7 @@ import { PNG } from "pngjs";
 import { spawn } from "node:child_process";
 import os from "node:os";
 import { homographyFromUnitSquare, applyHomography } from "../src/homography.js";
+import { sampleGrid, identityGrid } from "../src/gridwarp.js";
 
 const BASE = process.env.LDP_URL || "http://localhost:5173";
 const only = (process.argv.find((a) => a.startsWith("--only")) || "").split("=")[1]?.split(",");
@@ -594,6 +595,51 @@ SC.S18 = async () => {
   const alive = lum(png, 0.5, 0.5) > 40;
   const reg = await out.evaluate(() => window.__ldp.strokes.length);
   report("S18", "퍼즈 내성 (17종 악성 메시지)", alive && reg >= 1, `생존=${alive} reg=${reg}`, errors);
+  await ctx.close();
+};
+
+// ─── S19 격자 워프 (개정 2호) — 보간 수치 대조·저장·4코너 복귀 ───
+SC.S19 = async () => {
+  const { ctx, draw, out, errors } = await setup();
+  await fireStroke(draw, line(0.3, 0.5, 0.7, 0.5));
+  await out.waitForTimeout(300);
+  // 3×3 격자 — 중앙 제어점을 위로 당김 (곡면 볼록)
+  const pts = identityGrid(3, 3);
+  pts[4] = { x: 0.5, y: 0.28 };
+  await out.evaluate((points) => {
+    const bc = new BroadcastChannel("ldp-sync");
+    bc.postMessage({ t: "warp", mode: "grid", nx: 3, ny: 3, points, _sid: "mockg", _n: 1 });
+  }, pts);
+  await out.waitForTimeout(500);
+  const png = await shot(out);
+  const e1 = sampleGrid(pts, 3, 3, 0.5, 0.5); // 선 중앙의 기대 화면 위치 (위로 휨)
+  const e2 = sampleGrid(pts, 3, 3, 0.3, 0.5);
+  const bent = lumMax(png, e1.x, e1.y, 6) > 40 && lumMax(png, e2.x, e2.y, 6) > 40;
+  const origGone = lum(png, 0.5, 0.5) < 12; // 원위치에서 사라짐 (휘었으니)
+  const saved = await out.evaluate(() => {
+    try {
+      const w = JSON.parse(localStorage.getItem("ldp:warp") || "null");
+      return w && w.mode === "grid" && w.nx === 3 && w.points.length === 9;
+    } catch {
+      return false;
+    }
+  });
+  // 4코너 복귀 — ldp:warp 제거 + 평면 렌더 복원
+  await out.evaluate(() => {
+    const bc = new BroadcastChannel("ldp-sync");
+    bc.postMessage({ t: "warp", mode: "corners", _sid: "mockg", _n: 2 });
+  });
+  await out.waitForTimeout(400);
+  const png2 = await shot(out);
+  const flatBack = lum(png2, 0.5, 0.5) > 40; // 원위치 복원
+  const warpCleared = await out.evaluate(() => localStorage.getItem("ldp:warp") === null);
+  report(
+    "S19",
+    "격자 워프 (곡면 보간·저장·복귀)",
+    bent && origGone && saved && flatBack && warpCleared,
+    `휨위치(${e1.x.toFixed(2)},${e1.y.toFixed(2)})=${bent} 원위치소거=${origGone} 저장=${saved} 복귀=${flatBack} 정리=${warpCleared}`,
+    errors
+  );
   await ctx.close();
 };
 

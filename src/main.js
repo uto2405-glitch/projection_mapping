@@ -13,7 +13,7 @@ if (role === "draw") {
 } else if (role === "output") {
   startOutput(root);
 } else {
-  // 랜딩 — 역할 선택 (현장 접속은 출력 화면의 QR)
+  // 랜딩 허브 — 역할 + 브라우저 시뮬레이션 (프로젝터 없이 굴곡면 맵핑 연습)
   root.innerHTML = `
     <div class="landing">
       <h1>라이브 드로잉 프로젝션</h1>
@@ -22,5 +22,13 @@ if (role === "draw") {
         <a class="role-link" href="/?role=draw">✏️ 드로잉 (아이패드)</a>
         <a class="role-link" href="/?role=output">📽️ 출력 (프로젝터)</a>
       </nav>
+      <p class="landing-sub">가상 표면 시뮬레이션 — 프로젝터 없이 정렬·워프 연습</p>
+      <nav>
+        <a class="role-link sim" href="/?role=output&sim=curtain">🪟 커튼 주름</a>
+        <a class="role-link sim" href="/?role=output&sim=column">🏛 원기둥</a>
+        <a class="role-link sim" href="/?role=output&sim=globe">🌐 지구본</a>
+      </nav>
+      <p class="landing-hint">시뮬레이션 창과 드로잉 창을 나란히 열고, 드로잉의 ◱ 정렬 →
+      격자(3×3~5×5)로 표면 굴곡에 맞춰 보세요.</p>
     </div>`;
 }

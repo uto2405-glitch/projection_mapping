@@ -14,8 +14,11 @@ import {
   applyHomography,
   IDENTITY_CORNERS,
 } from "./homography.js";
+import { sampleGrid, validGrid } from "./gridwarp.js";
+import { drawSimSurface } from "./sim.js";
 
 const CORNERS_KEY = "ldp:corners";
+const WARP_KEY = "ldp:warp"; // 격자 워프 상태 (개정 2호) — 4코너 계약(A6)과 별도 보존
 const QR_IDLE_MS = 5 * 60 * 1000; // 드로잉 유휴 5분 후 QR 재표시
 
 const WARP_VERT = /* glsl */ `
@@ -102,8 +105,38 @@ export function startOutput(root) {
   });
   const warpQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), warpMat);
   warpQuad.frustumCulled = false;
+
+  // 격자 워프 메시 (개정 2호) — 곡면 손정렬. 정점 그리드를 제어점 보간으로 변위,
+  // 프래그먼트는 잉크+글로우를 콘텐츠 UV로 그대로 샘플 (순방향 워프)
+  const GRID_FRAG = /* glsl */ `
+    precision mediump float;
+    varying vec2 vUv;
+    uniform sampler2D uInk;
+    uniform sampler2D uGlow;
+    uniform float uGlowOn;
+    void main() {
+      vec2 c = vec2(vUv.x, 1.0 - vUv.y); // 콘텐츠 y아래
+      vec3 col = texture2D(uInk, c).rgb;
+      col += texture2D(uGlow, c).rgb * (0.85 * uGlowOn);
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `;
+  const gridMat = new THREE.ShaderMaterial({
+    vertexShader: WARP_VERT,
+    fragmentShader: GRID_FRAG,
+    uniforms: warpMat.uniforms, // uInk·uGlow·uGlowOn 공유 (uH는 격자에서 미사용)
+    depthTest: false,
+    depthWrite: false,
+  });
+  const GRID_SEG = [64, 36];
+  const gridGeom = new THREE.PlaneGeometry(2, 2, GRID_SEG[0], GRID_SEG[1]);
+  const gridMesh = new THREE.Mesh(gridGeom, gridMat);
+  gridMesh.frustumCulled = false;
+  gridMesh.visible = false;
+
   const presentScene = new THREE.Scene();
   presentScene.add(warpQuad);
+  presentScene.add(gridMesh);
   presentScene.add(fx.sparklePoints); // 입자는 스폰 시 CPU 워프 적용된 화면 좌표
 
   // ─── 읽기 전용 레지스트리 (채점 계약 — 실제 렌더 상태 반영, C4 교차검증 대상) ───
@@ -125,13 +158,68 @@ export function startOutput(root) {
     /* 손상된 저장값 — 항등 유지 */
   }
 
+  // ─── 워프 상태 — 4코너(기본) 또는 격자(개정 2호). 격자는 ldp:warp에 별도 저장 ───
+  const warp = { mode: "corners", nx: 3, ny: 3, points: null };
+  try {
+    const raw = localStorage.getItem(WARP_KEY);
+    if (raw) {
+      const w = JSON.parse(raw);
+      if (w && w.mode === "grid" && validGrid("grid", w.nx, w.ny, w.points)) {
+        warp.mode = "grid";
+        warp.nx = w.nx;
+        warp.ny = w.ny;
+        warp.points = w.points;
+      }
+    }
+  } catch {
+    /* 손상 저장값 — 4코너 유지 */
+  }
+
   let needRender = true;
+
+  function updateGridMesh() {
+    const pos = gridGeom.attributes.position;
+    const uv = gridGeom.attributes.uv;
+    for (let i = 0; i < pos.count; i++) {
+      const u = uv.getX(i);
+      const vDown = 1 - uv.getY(i); // 콘텐츠 y아래
+      const s = sampleGrid(warp.points, warp.nx, warp.ny, u, vDown);
+      pos.setXY(i, s.x * 2 - 1, 1 - s.y * 2); // 화면 y아래 → NDC
+    }
+    pos.needsUpdate = true;
+  }
+
   function applyCorners() {
     hFwd = homographyFromUnitSquare(corners);
     warpMat.uniforms.uH.value.fromArray(inverseWarpMatrixColumnMajor(corners));
     needRender = true;
   }
+
+  function applyWarp() {
+    const grid = warp.mode === "grid";
+    gridMesh.visible = grid;
+    warpQuad.visible = !grid;
+    if (grid) updateGridMesh();
+    else applyCorners();
+    needRender = true;
+  }
   applyCorners();
+  applyWarp();
+
+  /** 콘텐츠 → 화면(y아래) — 스파클 스폰용, 모드 공통 */
+  const contentToScreen = (x, y) =>
+    warp.mode === "grid" ? sampleGrid(warp.points, warp.nx, warp.ny, x, y) : applyHomography(hFwd, x, y);
+
+  // ─── 가상 표면 시뮬레이터 (?sim=curtain|column|globe) — 프로젝터 대역 ───
+  const simKind = new URLSearchParams(location.search).get("sim");
+  if (simKind) {
+    const page = root.querySelector(".output-page");
+    const simCanvas = document.createElement("canvas");
+    simCanvas.className = "sim-surface";
+    drawSimSurface(simCanvas, simKind);
+    page.insertBefore(simCanvas, canvas);
+    canvas.classList.add("sim-blend"); // screen 블렌드 — 검정=빛 없음(가산 광학)
+  }
 
   // ─── QR 접속 배지 (WORKFLOW 최초 설치 4) — 책상·채점(localhost)에서는 없음 ───
   const qrBadge = root.querySelector(".qr-badge");
@@ -174,7 +262,7 @@ export function startOutput(root) {
       m.lastY = p.y;
       if (m.acc >= 18) {
         m.acc = 0;
-        const s = applyHomography(hFwd, p.x, p.y); // 콘텐츠 → 화면(y아래)
+        const s = contentToScreen(p.x, p.y); // 콘텐츠 → 화면(y아래, 모드 공통)
         out.push({ x: s.x * 2 - 1, y: 1 - s.y * 2 }); // → NDC
       }
     }
@@ -241,7 +329,15 @@ export function startOutput(root) {
       case "corners":
         if (validCorners(msg.v)) {
           corners = msg.v.slice();
-          applyCorners();
+          if (warp.mode !== "corners") {
+            warp.mode = "corners"; // 4코너 조작 = 격자 해제
+            try {
+              localStorage.removeItem(WARP_KEY);
+            } catch {
+              /* noop */
+            }
+          }
+          applyWarp();
           try {
             localStorage.setItem(CORNERS_KEY, JSON.stringify(corners));
           } catch {
@@ -249,8 +345,44 @@ export function startOutput(root) {
           }
         }
         break;
+      case "warp":
+        // 격자 워프 (개정 2호) — grid 적용·저장 / corners 복귀
+        if (msg.mode === "grid" && validGrid("grid", msg.nx, msg.ny, msg.points)) {
+          warp.mode = "grid";
+          warp.nx = msg.nx;
+          warp.ny = msg.ny;
+          warp.points = msg.points.map((p) => ({ x: p.x, y: p.y }));
+          applyWarp();
+          try {
+            localStorage.setItem(
+              WARP_KEY,
+              JSON.stringify({ mode: "grid", nx: warp.nx, ny: warp.ny, points: warp.points })
+            );
+          } catch {
+            /* noop */
+          }
+        } else if (msg.mode === "corners") {
+          warp.mode = "corners";
+          applyWarp();
+          try {
+            localStorage.removeItem(WARP_KEY);
+          } catch {
+            /* noop */
+          }
+        }
+        break;
       case "corners-req":
         sync.send({ t: "corners", v: corners.slice() });
+        break;
+      case "warp-req":
+        sync.send({
+          t: "warp-state",
+          mode: warp.mode,
+          nx: warp.nx,
+          ny: warp.ny,
+          points: warp.points,
+          corners: corners.slice(),
+        });
         break;
     }
   });
@@ -272,6 +404,7 @@ export function startOutput(root) {
     }
     fx.setTime(t);
     renderer.setRenderTarget(null);
+    if (warp.mode === "grid") renderer.clear(); // 격자 메시는 전 화면을 덮지 않을 수 있다
     renderer.render(presentScene, camera);
   }
 
@@ -292,7 +425,8 @@ export function startOutput(root) {
       const gap = (t - lastFrameAt) * 1000;
       // 비대칭 EMA — 느려짐엔 즉각 반응, 빨라짐은 천천히 신뢰 (rAF 서비스 보호 우선)
       if (gap < 200) emaGap = gap > emaGap ? emaGap * 0.8 + gap * 0.2 : emaGap * 0.97 + gap * 0.03;
-      animDiv = emaGap > 18.5 ? 4 : emaGap > 17.0 ? 3 : 2;
+      // 열악 환경(배터리 모드·저사양)에서는 6분주(10Hz)까지 물러난다 — 감쇠는 저주파라 안전
+      animDiv = emaGap > 24 ? 6 : emaGap > 18.5 ? 4 : emaGap > 17.0 ? 3 : 2;
     }
     lastFrameAt = t;
     if (ink.hasNew() || needRender || (animBusy && frameNo % animDiv === 0)) {

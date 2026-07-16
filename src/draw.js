@@ -7,6 +7,7 @@
 import { createInk } from "./ink.js";
 import { openSync } from "./sync.js";
 import { IDENTITY_CORNERS } from "./homography.js";
+import { sampleGrid, identityGrid, gridFromCorners, resampleGrid, validGrid } from "./gridwarp.js";
 
 // 취향 앵커(개정 1호) 계열의 파스텔 발광 톤 + 기본 흰색
 const SWATCHES = [
@@ -50,6 +51,14 @@ export function startDraw(root) {
         </div>
         <div class="tgroup" aria-label="정렬">
           <button type="button" class="tbtn" data-test="align-mode" aria-pressed="false">◱ 정렬</button>
+          <div class="grid-sizes hidden" data-test="grid-size">
+            ${[0, 3, 4, 5]
+              .map(
+                (n) =>
+                  `<button type="button" class="tbtn gbtn" data-grid="${n}" aria-pressed="${n === 0}">${n === 0 ? "평면" : `${n}×${n}`}</button>`
+              )
+              .join("")}
+          </div>
           <button type="button" class="tbtn hidden" data-test="align-fine" aria-pressed="false">🎯 미세</button>
           <button type="button" class="tbtn hidden" data-test="align-reset">↺ 리셋</button>
         </div>
@@ -65,13 +74,9 @@ export function startDraw(root) {
           <div class="align-overlay hidden">
             <svg viewBox="0 0 100 100" preserveAspectRatio="none">
               <polygon class="align-poly" points="" />
+              <g class="align-grid-lines"></g>
             </svg>
-            ${[0, 1, 2, 3]
-              .map(
-                (k) =>
-                  `<div class="align-handle" data-corner="${k}"><span>${["↖", "↗", "↘", "↙"][k]}</span></div>`
-              )
-              .join("")}
+            <div class="align-handles"></div>
           </div>
         </div>
       </div>
@@ -366,61 +371,87 @@ export function startDraw(root) {
   sync.onUp(() => setBadge("ws"));
   sync.onDown(() => setBadge("down"));
 
-  // ─── 정렬 모드 (Q7 — 아이패드 원격 4코너) ───
-  const handles = [...root.querySelectorAll(".align-handle")];
+  // ─── 정렬 모드 (Q7 원격 4코너 + 개정 2호 격자 곡면) ───
+  const warp = { mode: "corners", nx: 3, ny: 3, points: null }; // 출력과 미러
+  const handlesBox = root.querySelector(".align-handles");
+  const gridLines = root.querySelector(".align-grid-lines");
+  let handleEls = [];
+
+  const getPt = (i) =>
+    warp.mode === "grid" ? warp.points[i] : { x: corners[i * 2], y: corners[i * 2 + 1] };
+  const setPt = (i, x, y) => {
+    if (warp.mode === "grid") {
+      warp.points[i].x = x;
+      warp.points[i].y = y;
+    } else {
+      corners[i * 2] = x;
+      corners[i * 2 + 1] = y;
+    }
+  };
 
   function renderAlignUi() {
-    poly.setAttribute(
-      "points",
-      [0, 1, 2, 3].map((k) => `${corners[k * 2] * 100},${corners[k * 2 + 1] * 100}`).join(" ")
-    );
-    handles.forEach((el, k) => {
-      el.style.left = corners[k * 2] * 100 + "%";
-      el.style.top = corners[k * 2 + 1] * 100 + "%";
-    });
-  }
-
-  let cornerSendQueued = false;
-  function sendCorners() {
-    if (cornerSendQueued) return;
-    cornerSendQueued = true;
-    requestAnimationFrame(() => {
-      cornerSendQueued = false;
-      sync.send({ t: "corners", v: corners.slice() });
-    });
-  }
-
-  alignBtn.addEventListener("click", () => {
-    state.alignMode = !state.alignMode;
-    alignBtn.setAttribute("aria-pressed", String(state.alignMode));
-    overlay.classList.toggle("hidden", !state.alignMode);
-    alignFineBtn.classList.toggle("hidden", !state.alignMode);
-    alignResetBtn.classList.toggle("hidden", !state.alignMode);
-    if (state.alignMode) {
-      sync.send({ t: "corners-req" }); // 현재 출력 코너를 받아 핸들 초기화
-      renderAlignUi();
+    if (warp.mode === "grid") {
+      poly.setAttribute("points", "");
+      // 격자선 — 제어점 사이를 24분할 샘플해 곡면 스플라인 그대로 표시
+      const P = (u, v) => {
+        const s = sampleGrid(warp.points, warp.nx, warp.ny, u, v);
+        return `${s.x * 100},${s.y * 100}`;
+      };
+      const steps = 24;
+      let svg = "";
+      for (let r = 0; r < warp.ny; r++)
+        svg += `<polyline points="${Array.from({ length: steps + 1 }, (_, i) => P(i / steps, r / (warp.ny - 1))).join(" ")}" />`;
+      for (let c = 0; c < warp.nx; c++)
+        svg += `<polyline points="${Array.from({ length: steps + 1 }, (_, i) => P(c / (warp.nx - 1), i / steps)).join(" ")}" />`;
+      gridLines.innerHTML = svg;
+      buildHandles(warp.nx * warp.ny, true);
+    } else {
+      gridLines.innerHTML = "";
+      poly.setAttribute(
+        "points",
+        [0, 1, 2, 3].map((k) => `${corners[k * 2] * 100},${corners[k * 2 + 1] * 100}`).join(" ")
+      );
+      buildHandles(4, false);
     }
-  });
+    handleEls.forEach((el, i) => {
+      const p = getPt(i);
+      el.style.left = p.x * 100 + "%";
+      el.style.top = p.y * 100 + "%";
+    });
+  }
 
-  alignFineBtn.addEventListener("click", () => {
-    state.alignFine = !state.alignFine;
-    alignFineBtn.setAttribute("aria-pressed", String(state.alignFine));
-  });
+  let warpSendQueued = false;
+  function sendWarp() {
+    if (warpSendQueued) return;
+    warpSendQueued = true;
+    requestAnimationFrame(() => {
+      warpSendQueued = false;
+      if (warp.mode === "grid")
+        sync.send({ t: "warp", mode: "grid", nx: warp.nx, ny: warp.ny, points: warp.points });
+      else sync.send({ t: "corners", v: corners.slice() }); // 기존 A6 검증 경로 유지
+    });
+  }
+  const sendCorners = sendWarp; // 하위 호환 별칭
 
-  alignResetBtn.addEventListener("click", () => {
-    corners = IDENTITY_CORNERS.slice();
-    renderAlignUi();
-    sendCorners();
-  });
+  function buildHandles(n, small) {
+    if (handleEls.length === n && (handleEls[0]?.classList.contains("small") ?? false) === small)
+      return;
+    handlesBox.innerHTML = Array.from(
+      { length: n },
+      (_, i) => `<div class="align-handle${small ? " small" : ""}" data-idx="${i}"><span>●</span></div>`
+    ).join("");
+    handleEls = [...handlesBox.querySelectorAll(".align-handle")];
+    handleEls.forEach((el, i) => attachHandleDrag(el, i));
+  }
 
-  // 상대 드래그 — 잡는 순간 점프 없음. 미세 모드는 이동량 ×0.25 (마지막 1cm용, B4)
-  // 포인터 ID 대조 — 드래그 중 손바닥 개입이 기준점을 탈취하지 못하게 (감사 2차 #6)
-  handles.forEach((el, k) => {
+  // 상대 드래그 + 포인터 ID 대조 + 미세 모드 ×0.25 (B4 마지막 1cm)
+  function attachHandleDrag(el, i) {
     let ref = null; // { pid, px, py, cx, cy }
     el.addEventListener("pointerdown", (e) => {
-      if (ref) return; // 진행 중 드래그 보호 — 두 번째 포인터(팜) 무시
+      if (ref) return;
       if (e.pointerType === "touch" && performance.now() - lastPenAt < 1500) return;
-      ref = { pid: e.pointerId, px: e.clientX, py: e.clientY, cx: corners[k * 2], cy: corners[k * 2 + 1] };
+      const p = getPt(i);
+      ref = { pid: e.pointerId, px: e.clientX, py: e.clientY, cx: p.x, cy: p.y };
       e.preventDefault();
       e.stopPropagation();
       try {
@@ -434,22 +465,83 @@ export function startDraw(root) {
       e.preventDefault();
       const r = stage.getBoundingClientRect();
       const scale = state.alignFine ? 0.25 : 1;
-      corners[k * 2] = Math.min(
-        1,
-        Math.max(0, ref.cx + ((e.clientX - ref.px) / Math.max(1, r.width)) * scale)
-      );
-      corners[k * 2 + 1] = Math.min(
-        1,
-        Math.max(0, ref.cy + ((e.clientY - ref.py) / Math.max(1, r.height)) * scale)
+      setPt(
+        i,
+        Math.min(1, Math.max(0, ref.cx + ((e.clientX - ref.px) / Math.max(1, r.width)) * scale)),
+        Math.min(1, Math.max(0, ref.cy + ((e.clientY - ref.py) / Math.max(1, r.height)) * scale))
       );
       renderAlignUi();
-      sendCorners();
+      sendWarp();
     });
     const stop = (e) => {
       if (ref && e.pointerId === ref.pid) ref = null;
     };
     el.addEventListener("pointerup", stop);
     el.addEventListener("pointercancel", stop);
+  }
+
+  // 격자 밀도 전환 — 현재 워프를 샘플링해 연속 초기화
+  const gridBtns = [...root.querySelectorAll(".gbtn")];
+  function updateGridButtons() {
+    gridBtns.forEach((b) => {
+      const n = +b.dataset.grid;
+      b.setAttribute(
+        "aria-pressed",
+        String(warp.mode === "grid" ? n === warp.nx : n === 0)
+      );
+    });
+  }
+  gridBtns.forEach((b) =>
+    b.addEventListener("click", () => {
+      const n = +b.dataset.grid;
+      if (n === 0) {
+        if (warp.mode === "grid") {
+          warp.mode = "corners";
+          sync.send({ t: "warp", mode: "corners" });
+        }
+      } else {
+        warp.points =
+          warp.mode === "grid"
+            ? resampleGrid(warp.points, warp.nx, warp.ny, n, n)
+            : gridFromCorners(corners, n, n);
+        warp.mode = "grid";
+        warp.nx = n;
+        warp.ny = n;
+        sync.send({ t: "warp", mode: "grid", nx: n, ny: n, points: warp.points });
+      }
+      updateGridButtons();
+      renderAlignUi();
+    })
+  );
+
+  alignBtn.addEventListener("click", () => {
+    state.alignMode = !state.alignMode;
+    alignBtn.setAttribute("aria-pressed", String(state.alignMode));
+    overlay.classList.toggle("hidden", !state.alignMode);
+    root.querySelector(".grid-sizes").classList.toggle("hidden", !state.alignMode);
+    alignFineBtn.classList.toggle("hidden", !state.alignMode);
+    alignResetBtn.classList.toggle("hidden", !state.alignMode);
+    if (state.alignMode) {
+      sync.send({ t: "warp-req" }); // 현재 출력 워프 상태(모드·격자·코너)를 받아 초기화
+      renderAlignUi();
+      updateGridButtons();
+    }
+  });
+
+  alignFineBtn.addEventListener("click", () => {
+    state.alignFine = !state.alignFine;
+    alignFineBtn.setAttribute("aria-pressed", String(state.alignFine));
+  });
+
+  alignResetBtn.addEventListener("click", () => {
+    if (warp.mode === "grid") {
+      warp.points = identityGrid(warp.nx, warp.ny);
+      sync.send({ t: "warp", mode: "grid", nx: warp.nx, ny: warp.ny, points: warp.points });
+    } else {
+      corners = IDENTITY_CORNERS.slice();
+      sendWarp();
+    }
+    renderAlignUi();
   });
 
   // ─── PNG 내보내기 — 현재 화면 스냅샷 (기념·기록) ───
@@ -479,7 +571,22 @@ export function startDraw(root) {
     else if (msg.t === "corners") {
       if (Array.isArray(msg.v) && msg.v.length === 8 && msg.v.every((n) => typeof n === "number")) {
         corners = msg.v.slice();
-        if (state.alignMode) renderAlignUi();
+        if (state.alignMode && warp.mode === "corners") renderAlignUi();
+      }
+    } else if (msg.t === "warp-state") {
+      // 출력의 현재 워프 상태로 정렬 UI 초기화
+      if (Array.isArray(msg.corners) && msg.corners.length === 8) corners = msg.corners.slice();
+      if (msg.mode === "grid" && validGrid("grid", msg.nx, msg.ny, msg.points)) {
+        warp.mode = "grid";
+        warp.nx = msg.nx;
+        warp.ny = msg.ny;
+        warp.points = msg.points.map((p) => ({ x: p.x, y: p.y }));
+      } else {
+        warp.mode = "corners";
+      }
+      if (state.alignMode) {
+        renderAlignUi();
+        updateGridButtons();
       }
     }
   });

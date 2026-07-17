@@ -3,3 +3,4 @@ dist/
 grader/last-report.json
 grader/export-check.png
 *.log
+relay/relay-state.jsonl

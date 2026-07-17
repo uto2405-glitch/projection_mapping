@@ -21,14 +21,19 @@ export function openSync() {
   let seq = 0;
   const lastSeen = new Map(); // 발신자 sid → 마지막 순번
 
-  /** 단절 중 쌓인 undo·clear 송출 — 상대가 살아있음이 확인된 시점에 호출 */
+  /** 단절 중 쌓인 undo·clear 재송출. 큐를 비우지 않는다 — 상대가 아직 미접속이면
+   *  릴레이가 버리므로, 이후 sync-req 때마다 다시 흘린다. 중복 수신은 순번 dedup이
+   *  걸러내고, undo/clear는 미수신자에게도 멱등이다. 15분 지나면 폐기. */
   function flushCritical() {
     if (!ws || ws.readyState !== 1) return;
-    while (pendingCritical.length) {
+    const cutoff = Date.now() - 15 * 60 * 1000;
+    for (let i = pendingCritical.length - 1; i >= 0; i--)
+      if (pendingCritical[i].qt < cutoff) pendingCritical.splice(i, 1);
+    for (const item of pendingCritical) {
       try {
-        ws.send(JSON.stringify(pendingCritical.shift()));
+        ws.send(JSON.stringify(item.env));
       } catch {
-        break; // 전송 실패 — 남은 큐는 다음 기회에
+        break; // 전송 실패 — 다음 기회에
       }
     }
   }
@@ -127,7 +132,7 @@ export function openSync() {
           /* 전송 실패 — 재연결 루프가 복구 */
         }
       } else if (!isLocal && (msg.t === "undo" || msg.t === "clear")) {
-        pendingCritical.push(env);
+        pendingCritical.push({ env, qt: Date.now() });
         if (pendingCritical.length > 200) pendingCritical.shift();
       }
     },
@@ -147,6 +152,8 @@ export function openSync() {
     },
     /** 책상 모드(localhost) 여부 — ws를 아예 쓰지 않는 환경 */
     isLocal,
+    /** ws 송신 버퍼 적체량 (백프레셔 판단용) — BC 전용 모드는 0 */
+    bufferedAmount: () => (ws && ws.readyState === 1 ? ws.bufferedAmount : 0),
     close() {
       closed = true;
       bc.close();

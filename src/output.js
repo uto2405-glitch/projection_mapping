@@ -16,6 +16,7 @@ import {
 } from "./homography.js";
 import { sampleGrid, validGrid } from "./gridwarp.js";
 import { drawSimSurface } from "./sim.js";
+import { createMediaAssembler, mediaUvMatrixColumnMajor } from "./mediasync.js";
 
 const CORNERS_KEY = "ldp:corners";
 const WARP_KEY = "ldp:warp"; // 격자 워프 상태 (개정 2호) — 4코너 계약(A6)과 별도 보존
@@ -29,14 +30,33 @@ const WARP_VERT = /* glsl */ `
   }
 `;
 
-// 잉크 + 글로우를 워프 좌표에서 한 번에 샘플 — 콘텐츠 합성과 제시를 단일 패스로
-const WARP_FRAG = /* glsl */ `
-  precision mediump float;
-  varying vec2 vUv;
+// 콘텐츠 합성(미디어+잉크+글로우 — 프로젝터의 가산 광학)과 워프 제시를 단일 패스로
+const COMPOSE_GLSL = /* glsl */ `
   uniform sampler2D uInk;
   uniform sampler2D uGlow;
   uniform float uGlowOn;
+  uniform sampler2D uMedia;
+  uniform float uMediaOn;
+  uniform float uMediaOpacity;
+  uniform mat3 uMediaM; // 콘텐츠(y아래) → 미디어 UV
+  vec3 composeAt(vec2 c) {
+    vec3 col = vec3(0.0);
+    if (uMediaOn > 0.5) {
+      vec3 mp = uMediaM * vec3(c, 1.0);
+      if (mp.x >= 0.0 && mp.x <= 1.0 && mp.y >= 0.0 && mp.y <= 1.0)
+        col += texture2D(uMedia, mp.xy).rgb * uMediaOpacity;
+    }
+    col += texture2D(uInk, c).rgb;
+    col += texture2D(uGlow, c).rgb * (0.85 * uGlowOn);
+    return col;
+  }
+`;
+
+const WARP_FRAG = /* glsl */ `
+  precision mediump float;
+  varying vec2 vUv;
   uniform mat3 uH; // 화면(y아래 정규화) → 콘텐츠 UV 역사상
+  ${"COMPOSE"}
   void main() {
     vec3 q = uH * vec3(vUv.x, 1.0 - vUv.y, 1.0);
     vec2 c = q.xy / q.z;
@@ -44,12 +64,9 @@ const WARP_FRAG = /* glsl */ `
       gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); // 워프 밖 — 검정
       return;
     }
-    // flipY=false — 캔버스 텍스처는 v=0이 상단(y아래 그대로), 글로우 RT도 동일 배열
-    vec3 col = texture2D(uInk, c).rgb;
-    col += texture2D(uGlow, c).rgb * (0.85 * uGlowOn);
-    gl_FragColor = vec4(col, 1.0);
+    gl_FragColor = vec4(composeAt(c), 1.0);
   }
-`;
+`.replace("COMPOSE", COMPOSE_GLSL);
 
 export function startOutput(root) {
   root.innerHTML = `
@@ -91,6 +108,8 @@ export function startOutput(root) {
   const fx = createFx({ renderer, inkTexture });
 
   // 워프 메시 — 잉크·글로우 텍스처를 호모그래피로 샘플 (면 추가 = 메시 추가)
+  const mediaFallback = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1);
+  mediaFallback.needsUpdate = true;
   const warpMat = new THREE.ShaderMaterial({
     vertexShader: WARP_VERT,
     fragmentShader: WARP_FRAG,
@@ -99,6 +118,10 @@ export function startOutput(root) {
       uGlow: { value: fx.glowTexture },
       uGlowOn: { value: 0 },
       uH: { value: new THREE.Matrix3() },
+      uMedia: { value: mediaFallback },
+      uMediaOn: { value: 0 },
+      uMediaOpacity: { value: 0.9 },
+      uMediaM: { value: new THREE.Matrix3() },
     },
     depthTest: false,
     depthWrite: false,
@@ -111,16 +134,12 @@ export function startOutput(root) {
   const GRID_FRAG = /* glsl */ `
     precision mediump float;
     varying vec2 vUv;
-    uniform sampler2D uInk;
-    uniform sampler2D uGlow;
-    uniform float uGlowOn;
+    ${"COMPOSE"}
     void main() {
       vec2 c = vec2(vUv.x, 1.0 - vUv.y); // 콘텐츠 y아래
-      vec3 col = texture2D(uInk, c).rgb;
-      col += texture2D(uGlow, c).rgb * (0.85 * uGlowOn);
-      gl_FragColor = vec4(col, 1.0);
+      gl_FragColor = vec4(composeAt(c), 1.0);
     }
-  `;
+  `.replace("COMPOSE", COMPOSE_GLSL);
   const gridMat = new THREE.ShaderMaterial({
     vertexShader: WARP_VERT,
     fragmentShader: GRID_FRAG,
@@ -269,6 +288,91 @@ export function startOutput(root) {
     if (out.length) fx.spawn(out, m.color, m.width, nowSec());
   }
 
+  // ─── 미디어 레이어 (ORDER-06, VISION #4) — 이미지·영상을 면에 합성 ───
+  const media = {
+    state: { on: false, opacity: 0.9, x: 0.5, y: 0.5, scale: 0.6, rot: 0 },
+    el: null, // HTMLImageElement | HTMLVideoElement
+    tex: null,
+    kind: null,
+    url: null,
+    aspect: 16 / 9,
+  };
+  function applyMediaUniforms() {
+    warpMat.uniforms.uMediaOn.value = media.state.on && media.tex ? 1 : 0;
+    warpMat.uniforms.uMediaOpacity.value = media.state.opacity;
+    warpMat.uniforms.uMediaM.value.fromArray(
+      mediaUvMatrixColumnMajor(media.state, media.aspect)
+    );
+    needRender = true;
+  }
+  function disposeMedia() {
+    if (media.el && media.kind === "video") {
+      media.el.pause();
+      media.el.src = "";
+    }
+    if (media.tex) media.tex.dispose();
+    if (media.url) URL.revokeObjectURL(media.url);
+    media.el = null; // 스테일 콜백 가드의 기준 — 진행 중 로드는 이 시점부터 무효
+    media.tex = null;
+    media.url = null;
+    media.kind = null;
+    media.aspect = 16 / 9;
+    warpMat.uniforms.uMedia.value = mediaFallback;
+    warpMat.uniforms.uMediaOn.value = 0;
+    needRender = true;
+  }
+  const mediaAssembler = createMediaAssembler(({ kind, blob }) => {
+    disposeMedia();
+    media.kind = kind;
+    media.url = URL.createObjectURL(blob);
+    if (kind === "video") {
+      const v = document.createElement("video");
+      v.muted = true;
+      v.loop = true;
+      v.playsInline = true;
+      v.src = media.url;
+      v.addEventListener(
+        "loadeddata",
+        () => {
+          if (media.el !== v) return; // 교체된 낡은 로드 — 무시 (스테일 콜백 가드)
+          media.aspect = (v.videoWidth || 16) / (v.videoHeight || 9);
+          media.tex = new THREE.VideoTexture(v);
+          media.tex.colorSpace = THREE.SRGBColorSpace;
+          media.tex.flipY = false;
+          warpMat.uniforms.uMedia.value = media.tex;
+          v.play().catch(() => {});
+          applyMediaUniforms();
+        },
+        { once: true }
+      );
+      media.el = v;
+    } else {
+      const img = new Image();
+      img.onload = () => {
+        if (media.el !== img) return; // 교체된 낡은 로드 — 무시
+        media.aspect = (img.naturalWidth || 16) / (img.naturalHeight || 9);
+        media.tex = new THREE.Texture(img);
+        media.tex.colorSpace = THREE.SRGBColorSpace;
+        media.tex.flipY = false;
+        media.tex.minFilter = THREE.LinearFilter;
+        media.tex.generateMipmaps = false;
+        media.tex.needsUpdate = true;
+        warpMat.uniforms.uMedia.value = media.tex;
+        applyMediaUniforms();
+      };
+      img.onerror = () => {
+        if (media.el === img) disposeMedia(); // 손상 blob — 상태 정리
+      };
+      img.src = media.url;
+      media.el = img;
+    }
+  });
+  const mediaPlaying = () =>
+    media.kind === "video" && media.el && !media.el.paused && media.state.on && media.tex;
+
+  // ─── 센서 리액티브 (ORDER-06, VISION #5) — 모션 지점에 별 반짝임 ───
+  let lastMotionSpawn = 0;
+
   // ─── 동기화 구독 ───
   const sync = openSync();
 
@@ -302,6 +406,8 @@ export function startOutput(root) {
           for (const s of msg.strokes) {
             if (!s || !Array.isArray(s.points)) continue;
             if (ink.pointCount(s.id) >= s.points.length) continue;
+            // 갤러리 리플레이(id=키)라도 라이브 원본을 이미 들고 있으면 중복 등록 금지
+            if (s.srcId && ink.pointCount(s.srcId) >= s.points.length) continue;
             ink.begin(s.id, { color: s.color, width: s.width, erase: s.erase });
             ink.addPoints(s.id, s.points);
             if (s.done) ink.end(s.id);
@@ -374,6 +480,51 @@ export function startOutput(root) {
       case "corners-req":
         sync.send({ t: "corners", v: corners.slice() });
         break;
+      case "media-part":
+        mediaAssembler(msg);
+        drawActivity();
+        break;
+      case "media-state":
+        if (msg.s && typeof msg.s === "object") {
+          const s = media.state;
+          s.on = !!msg.s.on;
+          if (isFinite(msg.s.opacity)) s.opacity = Math.min(1, Math.max(0.05, +msg.s.opacity));
+          if (isFinite(msg.s.x)) s.x = Math.min(1.5, Math.max(-0.5, +msg.s.x));
+          if (isFinite(msg.s.y)) s.y = Math.min(1.5, Math.max(-0.5, +msg.s.y));
+          if (isFinite(msg.s.scale)) s.scale = Math.min(2, Math.max(0.05, +msg.s.scale));
+          if (isFinite(msg.s.rot)) s.rot = +msg.s.rot;
+          if (media.kind === "video" && media.el) {
+            if (s.on) media.el.play().catch(() => {});
+            else media.el.pause();
+          }
+          applyMediaUniforms();
+        }
+        break;
+      case "media-clear":
+        disposeMedia();
+        break;
+      case "motion":
+        // 센서 모션 → 별 반짝임 (글로우 토글과 무관하게 발동)
+        if (isFinite(msg.x) && isFinite(msg.y)) {
+          const t = nowSec();
+          if (t - lastMotionSpawn > 0.03) {
+            lastMotionSpawn = t;
+            const s = contentToScreen(Math.min(1, Math.max(0, msg.x)), Math.min(1, Math.max(0, msg.y)));
+            const jitter = () => (Math.random() - 0.5) * 0.06;
+            fx.spawn(
+              Array.from({ length: 3 }, () => ({
+                x: s.x * 2 - 1 + jitter(),
+                y: 1 - s.y * 2 + jitter(),
+              })),
+              "#ffe9f5",
+              10,
+              t,
+              true // 강제 — 센서 리액티브는 독립 연출
+            );
+            // needRender 없이 sparklesAlive busy 경로가 렌더 — 적응 분주(A3 예산) 준수
+          }
+        }
+        break;
       case "warp-req":
         sync.send({
           t: "warp-state",
@@ -420,7 +571,7 @@ export function startOutput(root) {
     const p0 = P ? performance.now() : 0;
     const t = nowSec();
     frameNo++;
-    const animBusy = ink.fadeBusy() || fx.sparklesAlive(t);
+    const animBusy = ink.fadeBusy() || fx.sparklesAlive(t) || mediaPlaying();
     if (animBusy && lastFrameAt) {
       const gap = (t - lastFrameAt) * 1000;
       // 비대칭 EMA — 느려짐엔 즉각 반응, 빨라짐은 천천히 신뢰 (rAF 서비스 보호 우선)

@@ -8,6 +8,7 @@ import { createInk } from "./ink.js";
 import { openSync } from "./sync.js";
 import { IDENTITY_CORNERS } from "./homography.js";
 import { sampleGrid, identityGrid, gridFromCorners, resampleGrid, validGrid } from "./gridwarp.js";
+import { encodeMedia, sendChunks } from "./mediasync.js";
 
 // 취향 앵커(개정 1호) 계열의 파스텔 발광 톤 + 기본 흰색
 const SWATCHES = [
@@ -39,6 +40,22 @@ export function startDraw(root) {
           <button type="button" class="tbtn" data-test="undo">↩ 실행취소</button>
           <button type="button" class="tbtn" data-test="tool-eraser" aria-pressed="false">⌫ 지우개</button>
           <button type="button" class="tbtn danger" data-test="clear-all">🗑 모두 지우기</button>
+          <button type="button" class="tbtn" data-test="gallery-save" aria-pressed="false" title="완성 획을 릴레이에 영속 저장 (두 기기 모드)">🖼 갤러리</button>
+        </div>
+        <div class="tgroup" aria-label="미디어">
+          <button type="button" class="tbtn" data-test="media-load">📁 미디어</button>
+          <input type="file" class="media-file hidden" accept="image/*,video/*" />
+          <button type="button" class="tbtn" data-test="media-toggle" aria-pressed="false">🎬 표시</button>
+          <button type="button" class="tbtn" data-test="media-move" aria-pressed="false">🖐 위치</button>
+          <label class="slider-label">크기
+            <input type="range" min="10" max="150" value="60" data-test="media-scale" />
+          </label>
+          <label class="slider-label">회전
+            <input type="range" min="-180" max="180" value="0" data-test="media-rot" />
+          </label>
+          <label class="slider-label">불투명
+            <input type="range" min="10" max="100" value="90" data-test="media-opacity" />
+          </label>
         </div>
         <div class="tgroup" aria-label="연출">
           <button type="button" class="tbtn" data-test="toggle-glow" aria-pressed="false">✨ 글로우</button>
@@ -185,17 +202,36 @@ export function startDraw(root) {
 
   function finishStroke() {
     if (!active) return;
-    ink.end(active.id);
-    sync.send({ t: "e", id: active.id });
-    undoStack.push(active.id);
+    const id = active.id;
+    ink.end(id);
+    sync.send({ t: "e", id });
+    undoStack.push(id);
     if (undoStack.length > 100) undoStack.shift();
     active = null;
     predicted = [];
     lastReal = null;
+    if (galleryOn && !sync.isLocal) {
+      // 갤러리 영속화 요청 — persistedIds 등록은 릴레이의 persist-ack가 확정한다
+      const s = ink.getStrokes().find((x) => x.id === id);
+      if (s) sync.send({ t: "persist-stroke", stroke: s });
+    }
   }
 
+  let mediaDrag = null; // { pid, x0, y0, sx, sy } — 미디어 위치 모드 드래그
   canvas.addEventListener("pointerdown", (e) => {
     if (state.alignMode) return;
+    if (mediaMoveMode) {
+      if (mediaDrag) return;
+      const p = norm(e);
+      mediaDrag = { pid: e.pointerId, x0: p.x, y0: p.y, sx: mediaState.x, sy: mediaState.y };
+      e.preventDefault();
+      try {
+        canvas.setPointerCapture(e.pointerId);
+      } catch {
+        /* 무해 */
+      }
+      return;
+    }
     if (e.pointerType === "pen") lastPenAt = performance.now();
     if (active) {
       // 진행 중 획 보호: 펜은 터치(팜) 획을 탈취, 그 외 포인터는 무시
@@ -227,6 +263,14 @@ export function startDraw(root) {
   };
 
   canvas.addEventListener("pointermove", (e) => {
+    if (mediaDrag && e.pointerId === mediaDrag.pid) {
+      e.preventDefault();
+      const p = norm(e);
+      mediaState.x = Math.min(1.5, Math.max(-0.5, mediaDrag.sx + (p.x - mediaDrag.x0)));
+      mediaState.y = Math.min(1.5, Math.max(-0.5, mediaDrag.sy + (p.y - mediaDrag.y0)));
+      sendMediaState();
+      return;
+    }
     if (!active || e.pointerId !== active.pointerId) return;
     if (e.pointerType === "pen") lastPenAt = performance.now();
     e.preventDefault();
@@ -263,6 +307,10 @@ export function startDraw(root) {
   });
 
   const onUp = (e) => {
+    if (mediaDrag && e.pointerId === mediaDrag.pid) {
+      mediaDrag = null;
+      return;
+    }
     if (!active || e.pointerId !== active.pointerId) return;
     e.preventDefault();
     finishStroke();
@@ -544,6 +592,80 @@ export function startDraw(root) {
     renderAlignUi();
   });
 
+  // ─── 갤러리 영속화 (ORDER-06/#7) — 완성 획을 릴레이에 저장 ───
+  const galleryBtn = root.querySelector('[data-test="gallery-save"]');
+  let galleryOn = false;
+  // 릴레이가 persist-ack로 저장을 확인한 획만 등록 — 미확인 획은 announce 리플레이가 계속 책임진다
+  const persistedIds = new Set();
+  if (sync.isLocal) {
+    // 책상(BC 전용) 모드 — 저장 주체(릴레이)가 없다 (ORDER-06 B)
+    galleryBtn.disabled = true;
+    galleryBtn.title = "갤러리 저장은 두 기기(릴레이) 모드에서 사용할 수 있습니다";
+  }
+  galleryBtn.addEventListener("click", () => {
+    galleryOn = !galleryOn;
+    galleryBtn.setAttribute("aria-pressed", String(galleryOn));
+  });
+
+  // ─── 미디어 레이어 (ORDER-06/#4) ───
+  const mediaState = { on: false, opacity: 0.9, x: 0.5, y: 0.5, scale: 0.6, rot: 0 };
+  let mediaChunks = null; // 인코딩 캐시 — 출력 재부팅 시 재전송
+  let mediaSendCancel = null; // 진행 중 전송 취소 (announce 중첩·파일 교체 시)
+  let mediaMoveMode = false;
+  const mediaFile = root.querySelector(".media-file");
+  const mediaLoadBtn = root.querySelector('[data-test="media-load"]');
+  const mediaToggleBtn = root.querySelector('[data-test="media-toggle"]');
+  const mediaMoveBtn = root.querySelector('[data-test="media-move"]');
+
+  let mediaSendQueued = false;
+  function sendMediaState() {
+    if (mediaSendQueued) return;
+    mediaSendQueued = true;
+    requestAnimationFrame(() => {
+      mediaSendQueued = false;
+      sync.send({ t: "media-state", s: { ...mediaState } });
+    });
+  }
+
+  mediaLoadBtn.addEventListener("click", () => mediaFile.click());
+  mediaFile.addEventListener("change", async () => {
+    const f = mediaFile.files && mediaFile.files[0];
+    mediaFile.value = "";
+    if (!f) return;
+    try {
+      mediaLoadBtn.textContent = "⏳ 전송 중…";
+      const { chunks } = await encodeMedia(f);
+      mediaChunks = chunks;
+      if (mediaSendCancel) mediaSendCancel();
+      mediaSendCancel = sendChunks(sync, chunks, () => {
+        mediaLoadBtn.textContent = "📁 미디어";
+        mediaState.on = true;
+        mediaToggleBtn.setAttribute("aria-pressed", "true");
+        sendMediaState();
+      });
+    } catch (err) {
+      mediaLoadBtn.textContent = "📁 미디어";
+      alert("미디어 로드 실패: " + err.message);
+    }
+  });
+  mediaToggleBtn.addEventListener("click", () => {
+    mediaState.on = !mediaState.on;
+    mediaToggleBtn.setAttribute("aria-pressed", String(mediaState.on));
+    sendMediaState();
+  });
+  mediaMoveBtn.addEventListener("click", () => {
+    mediaMoveMode = !mediaMoveMode;
+    mediaMoveBtn.setAttribute("aria-pressed", String(mediaMoveMode));
+  });
+  const bindMediaSlider = (sel, key, div) =>
+    root.querySelector(`[data-test="${sel}"]`).addEventListener("input", (e) => {
+      mediaState[key] = +e.target.value / div;
+      sendMediaState();
+    });
+  bindMediaSlider("media-scale", "scale", 100);
+  bindMediaSlider("media-rot", "rot", 180 / Math.PI);
+  bindMediaSlider("media-opacity", "opacity", 100);
+
   // ─── PNG 내보내기 — 현재 화면 스냅샷 (기념·기록) ───
   exportBtn.addEventListener("click", () => {
     canvas.toBlob((blob) => {
@@ -562,13 +684,21 @@ export function startDraw(root) {
   const announce = () => {
     sync.send({ t: "hello", role: "draw" });
     sendFx();
-    const strokes = ink.getStrokes();
+    // 영속화된 획은 릴레이가 리플레이한다 — 여기서 재발행하면 이중 등록
+    const strokes = ink.getStrokes().filter((s) => !persistedIds.has(s.id));
     if (strokes.length) sync.send({ t: "replay", strokes });
+    if (mediaChunks) {
+      // 출력 (재)부팅 복구 — 이전 전송을 취소하고 단일 스트림만 유지 (중첩 방지)
+      if (mediaSendCancel) mediaSendCancel();
+      mediaSendCancel = sendChunks(sync, mediaChunks, () => sendMediaState());
+    }
   };
   sync.on((msg) => {
     if (!msg) return;
     if (msg.t === "sync-req") announce(); // 출력(재)부팅 — 연출 상태 + 획 리플레이 복구
-    else if (msg.t === "corners") {
+    else if (msg.t === "persist-ack") {
+      if (typeof msg.id === "string") persistedIds.add(msg.id); // 릴레이 저장 확정
+    } else if (msg.t === "corners") {
       if (Array.isArray(msg.v) && msg.v.length === 8 && msg.v.every((n) => typeof n === "number")) {
         corners = msg.v.slice();
         if (state.alignMode && warp.mode === "corners") renderAlignUi();

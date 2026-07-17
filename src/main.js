@@ -4,6 +4,7 @@
 import "./styles.css";
 import { startDraw } from "./draw.js";
 import { startOutput } from "./output.js";
+import { startSensor } from "./sensor.js";
 
 const role = new URLSearchParams(location.search).get("role");
 const root = document.getElementById("app");
@@ -12,6 +13,8 @@ if (role === "draw") {
   startDraw(root);
 } else if (role === "output") {
   startOutput(root);
+} else if (role === "sensor") {
+  startSensor(root);
 } else {
   // 랜딩 허브 — 역할 + 브라우저 시뮬레이션 (프로젝터 없이 굴곡면 맵핑 연습)
   root.innerHTML = `
@@ -21,6 +24,7 @@ if (role === "draw") {
       <nav>
         <a class="role-link" href="/?role=draw">✏️ 드로잉 (아이패드)</a>
         <a class="role-link" href="/?role=output">📽️ 출력 (프로젝터)</a>
+        <a class="role-link" href="/?role=sensor">👋 센서 (웹캠)</a>
       </nav>
       <p class="landing-sub">가상 표면 시뮬레이션 — 프로젝터 없이 정렬·워프 연습</p>
       <nav>

@@ -224,10 +224,12 @@ export function createFx({ renderer, inkTexture }) {
 
   let cursor = 0;
   let lastDeath = -1;
+  let forcedUntil = -1; // 센서 리액티브 — 글로우 토글과 무관한 스폰 창
 
-  /** 입자 생성 — ndcPts는 이미 워프 적용된 화면 NDC 좌표 배열 */
-  function spawn(ndcPts, colorHex, widthPx, now) {
-    if (!glowOn || !ndcPts.length) return;
+  /** 입자 생성 — ndcPts는 이미 워프 적용된 화면 NDC 좌표. force=글로우 무관(센서) */
+  function spawn(ndcPts, colorHex, widthPx, now, force = false) {
+    if ((!glowOn && !force) || !ndcPts.length) return;
+    if (force) forcedUntil = Math.max(forcedUntil, now + 3);
     const c = pastel(colorHex);
     for (const p of ndcPts) {
       const i = cursor;
@@ -259,12 +261,13 @@ export function createFx({ renderer, inkTexture }) {
     spawn,
     setGlow(on) {
       glowOn = !!on;
-      sparklePoints.visible = glowOn;
+      sparklePoints.visible = glowOn || sparkMat.uniforms.uTime.value < forcedUntil;
     },
     isGlowOn: () => glowOn,
-    sparklesAlive: (now) => glowOn && now <= lastDeath,
+    sparklesAlive: (now) => (glowOn || now < forcedUntil) && now <= lastDeath,
     setTime(now) {
       sparkMat.uniforms.uTime.value = now;
+      sparklePoints.visible = glowOn || now < forcedUntil;
     },
   };
 }

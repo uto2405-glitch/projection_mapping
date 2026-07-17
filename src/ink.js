@@ -44,9 +44,10 @@ export function createInk({ canvas = null, width = 1920, height = 1080 } = {}) {
   const lineWidthFor = (s) => Math.max(0.5, s.width * (surface.height / 1080));
   const fadeMode = () => fade.on && !fade.permanent;
 
-  /** 획 시작 — 같은 ID가 이미 있으면(드로잉 기기 리로드 등) 옛 획을 봉인하고 대체.
-   *  옛 획에 이어붙여 가짜 연결선·메타 오염이 생기는 것을 막는다 (감사 발견 #1). */
-  function begin(id, { color = "#ffffff", width = 6, erase = false } = {}) {
+  /** 획 시작 — 같은 키가 이미 있으면(드로잉 기기 리로드 등) 옛 획을 봉인하고 대체.
+   *  key는 내부 식별자(다중 사용자 시 발신자 네임스페이스), publicId는 레지스트리·
+   *  렌더 마크에 쓰는 공개 id(채점 계약: s000…). 단일 사용자는 둘이 같다. */
+  function begin(id, { color = "#ffffff", width = 6, erase = false } = {}, publicId = id) {
     const prev = strokes.get(id);
     if (prev) prev.done = true;
     const s = {
@@ -62,7 +63,7 @@ export function createInk({ canvas = null, width = 1920, height = 1080 } = {}) {
       expired: false,
       done: false,
       tip: false, // 종료 팁(마지막 반조각) 렌더 여부
-      pub: { id, pointsRendered: 0 },
+      pub: { id: publicId, pointsRendered: 0 },
     };
     strokes.set(id, s);
     order.push(s);
@@ -73,7 +74,11 @@ export function createInk({ canvas = null, width = 1920, height = 1080 } = {}) {
     if (!s || s.expired || !pts || !pts.length) return;
     const t = performance.now();
     for (const p of pts) {
-      if (p && isFinite(p.x) && isFinite(p.y)) s.points.push({ x: p.x, y: p.y, t });
+      if (p && isFinite(p.x) && isFinite(p.y)) {
+        // k = 필압 폭 계수 (개정 4호) — 미지원 입력은 1
+        const k = isFinite(p.k) ? Math.min(1.7, Math.max(0.4, p.k)) : 1;
+        s.points.push({ x: p.x, y: p.y, t, k });
+      }
     }
     dirty = true;
     blackPresented = false;
@@ -90,7 +95,13 @@ export function createInk({ canvas = null, width = 1920, height = 1080 } = {}) {
     ctx.globalAlpha = alpha;
     ctx.fillStyle = styleFor(s);
     ctx.beginPath();
-    ctx.arc(p.x * surface.width, p.y * surface.height, lineWidthFor(s) / 2, 0, Math.PI * 2);
+    ctx.arc(
+      p.x * surface.width,
+      p.y * surface.height,
+      (lineWidthFor(s) * (p.k || 1)) / 2,
+      0,
+      Math.PI * 2
+    );
     ctx.fill();
     ctx.globalAlpha = 1;
   }
@@ -122,30 +133,42 @@ export function createInk({ canvas = null, width = 1920, height = 1080 } = {}) {
     if (i < n || wantTip) {
       ctx.globalCompositeOperation = "source-over";
       ctx.strokeStyle = styleFor(s);
-      ctx.lineWidth = lineWidthFor(s);
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
-      ctx.beginPath();
-      let moved = false;
+      const base = lineWidthFor(s);
+      // 필압 가변폭 — 조각별 평균 계수로 폭을 바꾼다 (같은 폭 조각은 한 패스로 병합)
+      let curW = -1;
+      let open = false;
+      const setW = (w) => {
+        const q = Math.max(0.5, Math.round(w * 4) / 4);
+        if (q !== curW) {
+          if (open) ctx.stroke();
+          ctx.lineWidth = q;
+          ctx.beginPath();
+          open = false;
+          curW = q;
+        }
+      };
       for (; i < n; i++) {
+        const kk = ((pts[i - 1].k || 1) + (pts[i].k || 1)) / 2;
+        setW(base * kk);
         if (i === s.head + 1) {
           ctx.moveTo(px(i - 1), py(i - 1));
           ctx.lineTo(mx(i - 1, i), my(i - 1, i));
-          moved = true;
         } else {
-          if (!moved) {
-            ctx.moveTo(mx(i - 2, i - 1), my(i - 2, i - 1));
-            moved = true;
-          }
+          if (!open) ctx.moveTo(mx(i - 2, i - 1), my(i - 2, i - 1));
           ctx.quadraticCurveTo(px(i - 1), py(i - 1), mx(i - 1, i), my(i - 1, i));
         }
+        open = true;
       }
       if (s.done && !s.tip && n - s.head >= 2) {
-        if (!moved) ctx.moveTo(mx(n - 2, n - 1), my(n - 2, n - 1));
+        setW(base * (pts[n - 1].k || 1));
+        if (!open) ctx.moveTo(mx(n - 2, n - 1), my(n - 2, n - 1));
         ctx.lineTo(px(n - 1), py(n - 1)); // 팁 — 마지막 반조각 마감
+        open = true;
         s.tip = true;
       }
-      ctx.stroke();
+      if (open) ctx.stroke();
     }
     s.drawn = n;
   }
@@ -167,21 +190,24 @@ export function createInk({ canvas = null, width = 1920, height = 1080 } = {}) {
     const mx = (a, b) => (px(a) + px(b)) / 2;
     const my = (a, b) => (py(a) + py(b)) / 2;
     ctx.strokeStyle = styleFor(s);
-    ctx.lineWidth = lineWidthFor(s);
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
-    // 알파 버킷별로 패스를 묶어 stroke() 호출 수를 제한 (조각은 독립 moveTo)
-    const buckets = new Map();
+    const base = lineWidthFor(s);
+    // (알파×폭) 버킷별로 패스를 묶어 stroke() 호출 수를 제한 (조각은 독립 moveTo)
+    const buckets = new Map(); // key `${알파버킷}|${폭}` → { a, w, idxs }
     for (let k = i0 + 1; k < n; k++) {
       const a = 1 - (now - pts[k].t) / cutoffMs;
       if (a <= 0.01) continue;
       const b = Math.min(10, Math.max(1, Math.ceil(a * 10)));
-      let arr = buckets.get(b);
-      if (!arr) buckets.set(b, (arr = []));
-      arr.push(k);
+      const w = Math.max(0.5, Math.round(base * (((pts[k - 1].k || 1) + (pts[k].k || 1)) / 2) * 4) / 4);
+      const bk = b + "|" + w;
+      let entry = buckets.get(bk);
+      if (!entry) buckets.set(bk, (entry = { a: b / 10, w, idxs: [] }));
+      entry.idxs.push(k);
     }
-    for (const [b, idxs] of buckets) {
-      ctx.globalAlpha = b / 10;
+    for (const { a, w, idxs } of buckets.values()) {
+      ctx.globalAlpha = a;
+      ctx.lineWidth = w;
       ctx.beginPath();
       for (const k of idxs) {
         if (k === i0 + 1) {
@@ -204,7 +230,7 @@ export function createInk({ canvas = null, width = 1920, height = 1080 } = {}) {
     if (total > s.ever) {
       if (s.ever === 0 && !s.marked) {
         s.marked = true;
-        first.push(s.id);
+        first.push(s.pub.id); // 렌더 마크는 공개 id로 (채점 계약 s000…)
         pub.push(s.pub);
       }
       s.pub.pointsRendered += total - s.ever;
@@ -345,7 +371,7 @@ export function createInk({ canvas = null, width = 1920, height = 1080 } = {}) {
         width: s.width,
         erase: s.erase,
         done: !!s.done,
-        points: s.points.slice(s.head).map((p) => ({ x: p.x, y: p.y })),
+        points: s.points.slice(s.head).map((p) => ({ x: p.x, y: p.y, k: p.k })),
       }));
   }
 

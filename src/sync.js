@@ -131,7 +131,10 @@ export function openSync() {
         } catch {
           /* 전송 실패 — 재연결 루프가 복구 */
         }
-      } else if (!isLocal && (msg.t === "undo" || msg.t === "clear")) {
+      } else if (!isLocal && msg.t === "undo") {
+        // undo만 큐잉 — 특정 획 대상이라 늦게 도착해도 멱등·무해.
+        // clear는 재송신하지 않는다: 스테일 clear가 이후 작품을 소급 전소하는 경로가
+        // 이득보다 위험하고, 단절 중 clear 유실은 화면에 보여 운영자가 재클릭으로 복구한다.
         pendingCritical.push({ env, qt: Date.now() });
         if (pendingCritical.length > 200) pendingCritical.shift();
       }

@@ -28,6 +28,7 @@ await out.goto(`${BASE}/?role=output&sim=globe`, { waitUntil: "domcontentloaded"
 await draw.waitForTimeout(400);
 
 // 미디어 로드 → 지구본 위 배치 (중앙, 작게)
+await draw.locator('.tab-btn[data-tab="media"]').click();
 await draw.setInputFiles(".media-file", { name: "nebula.png", mimeType: "image/png", buffer: nebulaPng() });
 await out.waitForTimeout(1500);
 await draw.evaluate(() => {
@@ -41,6 +42,7 @@ await draw.evaluate(() => {
 });
 
 // 글로우 + 획
+await draw.locator('.tab-btn[data-tab="draw"]').click();
 await draw.locator('[data-test="toggle-glow"]').click();
 const box = await draw.locator('[data-test="draw-canvas"]').boundingBox();
 await draw.evaluate(

@@ -103,9 +103,12 @@ wss.on("connection", (ws, req) => {
     if (!isBinary) {
       try {
         const msg = JSON.parse(data.toString());
-        if (isDuplicate(msg)) return; // 재송신 봉투 — 영속화·중계 모두 차단
+        // 재송신 봉투는 영속화 부작용만 차단하고 중계는 통과 —
+        // 늦게 재접속한 출력이 밀린 undo를 받아야 하고, 이미 받은 수신자는 순번으로 거른다.
         const sid = msg._sid || "anon";
-        if (msg.t === "persist-stroke" && msg.stroke && msg.stroke.id) {
+        if (isDuplicate(msg)) {
+          /* 부작용 없이 아래 중계로 */
+        } else if (msg.t === "persist-stroke" && msg.stroke && msg.stroke.id) {
           const key = `${sid}:${msg.stroke.id}`;
           const stroke = { ...msg.stroke, id: undefined };
           gallery.set(key, { stroke, srcSid: sid, srcId: msg.stroke.id });

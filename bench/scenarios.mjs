@@ -98,6 +98,8 @@ const rgb = (png, nx, ny) => {
 };
 
 const click = (page, sel) => page.locator(`[data-test="${sel}"]`).click();
+// 탭 UI(ORDER-08) — 미디어·정렬 컨트롤은 해당 탭을 먼저 연다
+const openTab = (page, name) => page.locator(`.tab-btn[data-tab="${name}"]`).click();
 const setSlider = (page, sel, v) =>
   page.evaluate(
     ({ sel, v }) => {
@@ -660,6 +662,7 @@ function makePng(r, g, b, w = 64, h = 64) {
 // ─── S20 미디어 레이어 — 로드·합성·토글 (같은 기기) ───
 SC.S20 = async () => {
   const { ctx, draw, out, errors } = await setup();
+  await openTab(draw, "media");
   await draw.setInputFiles(".media-file", {
     name: "test-red.png",
     mimeType: "image/png",
@@ -697,6 +700,7 @@ SC.S21 = async () => {
   await draw.goto(`http://${ip}:5173/?role=draw`, { waitUntil: "domcontentloaded" });
   await out.goto(`http://${ip}:5173/?role=output`, { waitUntil: "domcontentloaded" });
   await draw.waitForTimeout(1500);
+  await openTab(draw, "media");
   await draw.setInputFiles(".media-file", {
     name: "blue.png",
     mimeType: "image/png",
@@ -732,7 +736,9 @@ SC.S22 = async () => {
   await draw.goto(`http://${ip}:5173/?role=draw`, { waitUntil: "domcontentloaded" });
   await out.goto(`http://${ip}:5173/?role=output`, { waitUntil: "domcontentloaded" });
   await draw.waitForTimeout(1500);
+  await openTab(draw, "media");
   await click(draw, "gallery-save"); // 갤러리 ON
+  await openTab(draw, "draw");
   await fireStroke(draw, line(0.2, 0.35, 0.8, 0.35)); // 영속 획
   await fireStroke(draw, line(0.2, 0.65, 0.8, 0.65)); // 영속 획 2
   await click(draw, "undo"); // 두 번째 획 취소 → 갤러리에서도 제거돼야
@@ -795,6 +801,139 @@ SC.S23 = async () => {
   report("S23", "센서 모션 → 이벤트·반짝임", events >= 3 && lit > 0, `이벤트=${events} 발광샘플=${lit}`, errors);
   await ctx.close();
   await fb.close();
+};
+
+// ─── S24 멀티 아웃풋 (개정 4호) — 출력별 독립 워프·저장 격리 ───
+SC.S24 = async () => {
+  const { ctx, draw, out, errors } = await setup();
+  const out2 = await ctx.newPage();
+  out2.on("console", (m) => {
+    if (m.type() === "error") errors.push("out2: " + m.text());
+  });
+  await out2.goto(`${BASE}/?role=output&id=2`, { waitUntil: "domcontentloaded" });
+  await draw.waitForTimeout(300);
+  await fireStroke(draw, line(0.3, 0.5, 0.7, 0.5));
+  await out.waitForTimeout(400);
+  // 두 출력 모두 같은 획 표시
+  const both = lum(await shot(out), 0.5, 0.5) > 40 && lum(await shot(out2), 0.5, 0.5) > 40;
+  // 출력 2에만 격자 워프 (out:'2' 태그)
+  const pts = identityGrid(3, 3);
+  pts[4] = { x: 0.5, y: 0.25 };
+  await draw.evaluate((points) => {
+    const bc = new BroadcastChannel("ldp-sync");
+    bc.postMessage({ t: "warp", mode: "grid", nx: 3, ny: 3, points, out: "2", _sid: "m24", _n: 1 });
+  }, pts);
+  await out.waitForTimeout(500);
+  const defaultFlat = lum(await shot(out), 0.5, 0.5) > 40; // 기본 출력은 그대로
+  const png2 = await shot(out2);
+  const e = sampleGrid(pts, 3, 3, 0.5, 0.5);
+  const out2Bent = lumMax(png2, e.x, e.y, 6) > 40 && lum(png2, 0.5, 0.5) < 12; // 2번만 휨
+  const keys = await out2.evaluate(() => ({
+    w2: localStorage.getItem("ldp:warp:2") !== null,
+    wDefault: localStorage.getItem("ldp:warp") === null,
+  }));
+  report(
+    "S24",
+    "멀티 아웃풋 (독립 워프·저장 격리)",
+    both && defaultFlat && out2Bent && keys.w2 && keys.wDefault,
+    `양쪽표시=${both} 기본불변=${defaultFlat} 2번휨=${out2Bent} 저장격리=${keys.w2 && keys.wDefault}`,
+    errors
+  );
+  await ctx.close();
+};
+
+// ─── S25 다중 사용자 동시 드로잉 (개정 4호) — 발신자 네임스페이스 ───
+SC.S25 = async () => {
+  const { ctx, draw, out, errors } = await setup();
+  const draw2 = await ctx.newPage();
+  draw2.on("console", (m) => {
+    if (m.type() === "error") errors.push("draw2: " + m.text());
+  });
+  await draw2.goto(`${BASE}/?role=draw`, { waitUntil: "domcontentloaded" });
+  await draw2.waitForTimeout(300);
+  // 각자 색 지정 후, 같은 id(s000)로 동시 드로잉 — 교차 오염 없어야 함
+  for (const [p, c] of [
+    [draw, "#ff5060"],
+    [draw2, "#5080ff"],
+  ])
+    await p.evaluate((hex) => {
+      const el = document.querySelector('[data-test="pen-color"]');
+      el.value = hex;
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    }, c);
+  await Promise.all([
+    fireStroke(draw, line(0.2, 0.3, 0.8, 0.3)), // 둘 다 각자의 s000
+    fireStroke(draw2, line(0.2, 0.7, 0.8, 0.7)),
+  ]);
+  await out.waitForTimeout(500);
+  const png = await shot(out);
+  const reg = await out.evaluate(() => window.__ldp.strokes.map((s) => ({ ...s })));
+  const red = rgb(png, 0.5, 0.3);
+  const blue = rgb(png, 0.5, 0.7);
+  const colorsOk = red[0] > 120 && red[0] > red[2] + 40 && blue[2] > 120 && blue[2] > blue[0] + 40;
+  const noBridge = lum(png, 0.5, 0.5) < 12; // 두 획 사이 오염 없음
+  report(
+    "S25",
+    "다중 사용자 동시 드로잉",
+    reg.length === 2 && colorsOk && noBridge,
+    `reg=${reg.length}(${reg.map((r) => r.id)}) 색분리=${colorsOk} 교차오염없음=${noBridge}`,
+    errors
+  );
+  await ctx.close();
+};
+
+// ─── S26 필압 가변폭 (개정 4호) — 압력에 따라 획 굵기 변화 ───
+SC.S26 = async () => {
+  const { ctx, draw, out, errors } = await setup();
+  const box = await draw.locator('[data-test="draw-canvas"]').boundingBox();
+  await draw.evaluate(
+    ({ box }) => {
+      const el = document.querySelector('[data-test="draw-canvas"]');
+      const fire = (kind, x, y, pressure) =>
+        el.dispatchEvent(
+          new PointerEvent(kind, {
+            pointerType: "pen",
+            pointerId: 1,
+            isPrimary: true,
+            bubbles: true,
+            pressure,
+            clientX: box.x + x * box.width,
+            clientY: box.y + y * box.height,
+            buttons: kind === "pointerup" ? 0 : 1,
+          })
+        );
+      // 왼쪽(저압 0.1) → 오른쪽(고압 0.95) 가로선
+      fire("pointerdown", 0.15, 0.5, 0.1);
+      for (let i = 1; i <= 40; i++)
+        fire("pointermove", 0.15 + i * 0.0175, 0.5, 0.1 + (i / 40) * 0.85);
+      fire("pointerup", 0.85, 0.5, 0.95);
+    },
+    { box }
+  );
+  await out.waitForTimeout(500);
+  const png = await shot(out);
+  // 세로 슬라이스의 발광 픽셀 수 = 획 두께 근사
+  const thickness = (nx) => {
+    let n = 0;
+    const contentH = (png.width * 9) / 16;
+    const y0 = (png.height - contentH) / 2;
+    const x = Math.round(nx * png.width);
+    for (let y = Math.round(y0 + 0.4 * contentH); y < y0 + 0.6 * contentH; y++) {
+      const i = (y * png.width + x) * 4;
+      if (png.data[i] > 60) n++;
+    }
+    return n;
+  };
+  const thin = thickness(0.22);
+  const thick = thickness(0.78);
+  report(
+    "S26",
+    "필압 가변폭 (저압→고압)",
+    thin >= 1 && thick >= thin * 1.6,
+    `저압두께=${thin}px 고압두께=${thick}px (배율 ${(thick / Math.max(1, thin)).toFixed(2)})`,
+    errors
+  );
+  await ctx.close();
 };
 
 // ─── 실행 ───

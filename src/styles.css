@@ -67,37 +67,112 @@ body {
   line-height: 1.5;
 }
 
-/* ─── 드로잉 페이지 ─── */
+/* ─── 드로잉 페이지 (ORDER-08 — Procreate·MadMapper 벤치마크 탭 UI) ─── */
 .draw-page {
   height: 100%;
   display: flex;
   flex-direction: column;
+  --accent: #ffd1ea;
+  --panel: rgba(18, 18, 24, 0.92);
+  --line: #26262e;
 }
 
-.toolbar {
+/* 상단 슬림바: 브랜드 · 탭 · 상시 유틸 */
+.topbar {
   flex: none;
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 10px 18px;
-  /* 홈 화면 앱 모드에서 상태바·노치 침범 방지 */
-  padding: max(10px, env(safe-area-inset-top)) max(14px, env(safe-area-inset-right)) 10px
+  gap: 14px;
+  padding: max(8px, env(safe-area-inset-top)) max(14px, env(safe-area-inset-right)) 8px
     max(14px, env(safe-area-inset-left));
-  background: #101014;
-  border-bottom: 1px solid #26262c;
+  background: var(--panel);
+  backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--line);
   user-select: none;
   -webkit-user-select: none;
   touch-action: manipulation;
 }
-
-.tgroup {
+.brand-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, #fff, var(--accent) 55%, #b06090);
+  box-shadow: 0 0 10px rgba(255, 209, 234, 0.55);
+}
+.tabs {
+  display: flex;
+  gap: 4px;
+  background: #0c0c11;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 3px;
+}
+.tab-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: #9aa;
+  border-radius: 9px;
+  padding: 8px 16px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  min-height: 40px;
+  white-space: nowrap;
+}
+.tab-btn.active {
+  background: #1e1e28;
+  color: #fff;
+  box-shadow: inset 0 0 0 1px #33333e;
+}
+.util {
+  margin-left: auto;
   display: flex;
   align-items: center;
   gap: 8px;
 }
-.tgroup + .tgroup {
-  padding-left: 18px;
-  border-left: 1px solid #26262c;
+.ubtn {
+  appearance: none;
+  width: 42px;
+  height: 42px;
+  border: 1px solid var(--line);
+  background: #15151c;
+  color: #ddd;
+  border-radius: 11px;
+  font-size: 1.05rem;
+  cursor: pointer;
+}
+.ubtn:hover {
+  border-color: #4a4a56;
+}
+.ubtn.danger:hover {
+  border-color: #b3564f;
+  color: #ffb0a8;
+}
+
+/* 컨텍스트 바 — 활성 탭의 컨트롤만 */
+.context-bar {
+  flex: none;
+  background: #0d0d12;
+  border-bottom: 1px solid var(--line);
+  padding: 8px max(14px, env(safe-area-inset-right)) 8px max(14px, env(safe-area-inset-left));
+}
+.tool-tab {
+  display: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+.tool-tab.active {
+  display: flex;
+}
+.pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #14141b;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 6px 10px;
 }
 
 .swatches {
@@ -105,13 +180,17 @@ body {
   gap: 6px;
 }
 .swatch {
-  width: 30px;
-  height: 30px;
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
-  border: 2px solid #333;
+  border: 2px solid #33333c;
   background: var(--c);
   cursor: pointer;
   padding: 0;
+  transition: transform 0.08s;
+}
+.swatch:active {
+  transform: scale(0.92);
 }
 .swatch.active {
   border-color: #fff;
@@ -119,26 +198,48 @@ body {
 }
 
 input[type="color"] {
-  width: 34px;
-  height: 34px;
+  width: 36px;
+  height: 36px;
   border: none;
-  border-radius: 8px;
+  border-radius: 9px;
   background: transparent;
   padding: 0;
   cursor: pointer;
 }
 
+.width-dot {
+  display: inline-block;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 6px rgba(255, 255, 255, 0.4);
+  transition: width 0.1s, height 0.1s;
+}
+
 .slider-label {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 0.85rem;
-  color: #aaa;
+  gap: 7px;
+  font-size: 0.8rem;
+  color: #9aa;
   white-space: nowrap;
 }
+.slider-label span:first-child {
+  min-width: 0;
+}
 input[type="range"] {
-  width: 110px;
-  accent-color: #ffd1ea;
+  width: 108px;
+  height: 26px;
+  accent-color: var(--accent);
+}
+select {
+  appearance: none;
+  background: #1a1a22;
+  color: #ddd;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 8px 12px;
+  font-size: 0.85rem;
+  min-height: 38px;
 }
 .trail-secs-value {
   min-width: 30px;
@@ -148,22 +249,27 @@ input[type="range"] {
 
 .tbtn {
   appearance: none;
-  border: 1px solid #333;
-  background: #17171c;
+  border: 1px solid #33333c;
+  background: #1a1a22;
   color: #ddd;
   border-radius: 10px;
-  padding: 9px 14px;
-  font-size: 0.9rem;
+  padding: 8px 13px;
+  font-size: 0.88rem;
   cursor: pointer;
   white-space: nowrap;
   min-height: 40px;
+  transition: background 0.1s, border-color 0.1s;
 }
 .tbtn:hover {
-  border-color: #555;
+  border-color: #52525e;
+}
+.tbtn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 .tbtn[aria-pressed="true"] {
-  background: #ffd1ea;
-  border-color: #ffd1ea;
+  background: var(--accent);
+  border-color: var(--accent);
   color: #201018;
   font-weight: 600;
 }
@@ -173,16 +279,21 @@ input[type="range"] {
 }
 
 .sync-badge {
-  margin-left: auto;
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   color: #7a7f8a;
   white-space: nowrap;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: #101016;
 }
 .sync-badge[data-state="ws"] {
   color: #9fe0b0;
+  border-color: #2c4a36;
 }
 .sync-badge[data-state="wait"] {
   color: #e6c98a;
+  border-color: #4a3f2c;
 }
 
 .canvas-wrap {

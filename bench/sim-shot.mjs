@@ -66,7 +66,8 @@ await out.waitForTimeout(600);
 await out.screenshot({ path: "bench/shots/8-sim-gridwarp.png" });
 
 // 드로잉 쪽 정렬 UI (격자 4×4 핸들·격자선)
-await draw.locator('[data-test="align-mode"]').click();
+await draw.locator('.tab-btn[data-tab="align"]').click();
+  await draw.locator('[data-test="align-mode"]').click();
 await draw.waitForTimeout(500);
 await draw.screenshot({ path: "bench/shots/9-align-grid.png" });
 console.log("shots 저장");

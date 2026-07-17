@@ -18,8 +18,11 @@ import { sampleGrid, validGrid } from "./gridwarp.js";
 import { drawSimSurface } from "./sim.js";
 import { createMediaAssembler, mediaUvMatrixColumnMajor } from "./mediasync.js";
 
-const CORNERS_KEY = "ldp:corners";
-const WARP_KEY = "ldp:warp"; // 격자 워프 상태 (개정 2호) — 4코너 계약(A6)과 별도 보존
+// 멀티 아웃풋 (개정 4호, VISION 테제 4): ?id=n 별 독립 워프 저장.
+// 기본 출력(id 없음)은 기존 키 그대로 — A6 계약(ldp:corners) 불변.
+const OUT_ID = new URLSearchParams(location.search).get("id") || "";
+const CORNERS_KEY = OUT_ID ? `ldp:corners:${OUT_ID}` : "ldp:corners";
+const WARP_KEY = OUT_ID ? `ldp:warp:${OUT_ID}` : "ldp:warp"; // 격자 워프 (개정 2호)
 const QR_IDLE_MS = 5 * 60 * 1000; // 드로잉 유휴 5분 후 QR 재표시
 
 const WARP_VERT = /* glsl */ `
@@ -376,27 +379,35 @@ export function startOutput(root) {
   // ─── 동기화 구독 ───
   const sync = openSync();
 
+  // 다중 사용자 동시 드로잉 (개정 4호): 내부 키 = 발신자 네임스페이스 — 두 아이패드의
+  // s000이 충돌하지 않는다. 레지스트리·렌더 마크는 공개 id(msg.id) 유지 (채점 불변).
+  const keyOf = (msg) => `${msg._sid || "x"}:${msg.id}`;
+
   sync.on((msg) => {
     if (!msg) return;
     switch (msg.t) {
-      case "s":
-        ink.begin(msg.id, { color: msg.color, width: msg.width, erase: msg.erase });
-        strokeMeta.set(msg.id, { color: msg.color, width: msg.width, erase: msg.erase });
-        ink.addPoints(msg.id, msg.p);
-        feedSparkles(msg.id, msg.p);
+      case "s": {
+        const key = keyOf(msg);
+        ink.begin(key, { color: msg.color, width: msg.width, erase: msg.erase }, msg.id);
+        strokeMeta.set(key, { color: msg.color, width: msg.width, erase: msg.erase });
+        ink.addPoints(key, msg.p);
+        feedSparkles(key, msg.p);
         drawActivity();
         break;
-      case "a":
-        ink.addPoints(msg.id, msg.p);
-        feedSparkles(msg.id, msg.p);
+      }
+      case "a": {
+        const key = keyOf(msg);
+        ink.addPoints(key, msg.p);
+        feedSparkles(key, msg.p);
         break;
+      }
       case "e":
-        ink.end(msg.id);
-        strokeMeta.delete(msg.id);
+        ink.end(keyOf(msg));
+        strokeMeta.delete(keyOf(msg));
         break;
       case "undo":
-        ink.remove(msg.id);
-        strokeMeta.delete(msg.id);
+        ink.remove(keyOf(msg));
+        strokeMeta.delete(keyOf(msg));
         needRender = true;
         glowForce = true;
         break;
@@ -405,12 +416,18 @@ export function startOutput(root) {
         if (Array.isArray(msg.strokes)) {
           for (const s of msg.strokes) {
             if (!s || !Array.isArray(s.points)) continue;
-            if (ink.pointCount(s.id) >= s.points.length) continue;
-            // 갤러리 리플레이(id=키)라도 라이브 원본을 이미 들고 있으면 중복 등록 금지
-            if (s.srcId && ink.pointCount(s.srcId) >= s.points.length) continue;
-            ink.begin(s.id, { color: s.color, width: s.width, erase: s.erase });
-            ink.addPoints(s.id, s.points);
-            if (s.done) ink.end(s.id);
+            const key = `${msg._sid || "x"}:${s.id}`;
+            if (ink.pointCount(key) >= s.points.length) continue;
+            // 갤러리 리플레이라도 라이브 원본을 이미 들고 있으면 중복 등록 금지
+            if (
+              s.srcSid &&
+              s.srcId &&
+              ink.pointCount(`${s.srcSid}:${s.srcId}`) >= s.points.length
+            )
+              continue;
+            ink.begin(key, { color: s.color, width: s.width, erase: s.erase }, s.srcId || s.id);
+            ink.addPoints(key, s.points);
+            if (s.done) ink.end(key);
           }
         }
         drawActivity();
@@ -433,6 +450,7 @@ export function startOutput(root) {
         drawActivity();
         break;
       case "corners":
+        if ((msg.out || "") !== OUT_ID) break; // 다른 출력 대상 (멀티 아웃풋)
         if (validCorners(msg.v)) {
           corners = msg.v.slice();
           if (warp.mode !== "corners") {
@@ -452,6 +470,7 @@ export function startOutput(root) {
         }
         break;
       case "warp":
+        if ((msg.out || "") !== OUT_ID) break; // 다른 출력 대상 (멀티 아웃풋)
         // 격자 워프 (개정 2호) — grid 적용·저장 / corners 복귀
         if (msg.mode === "grid" && validGrid("grid", msg.nx, msg.ny, msg.points)) {
           warp.mode = "grid";
@@ -478,7 +497,8 @@ export function startOutput(root) {
         }
         break;
       case "corners-req":
-        sync.send({ t: "corners", v: corners.slice() });
+        if ((msg.out || "") !== OUT_ID) break;
+        sync.send({ t: "corners", v: corners.slice(), out: OUT_ID });
         break;
       case "media-part":
         mediaAssembler(msg);
@@ -526,8 +546,10 @@ export function startOutput(root) {
         }
         break;
       case "warp-req":
+        if ((msg.out || "") !== OUT_ID) break;
         sync.send({
           t: "warp-state",
+          out: OUT_ID,
           mode: warp.mode,
           nx: warp.nx,
           ny: warp.ny,

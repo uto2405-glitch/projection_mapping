@@ -1,8 +1,9 @@
 // 드로잉 UI (?role=draw) — 아이패드 사파리가 1급 시민.
-// Pointer Events + getCoalescedEvents, touch-action 차단, 로컬 미리보기 즉시 렌더.
-// 팜 리젝션: 펜 사용 중 터치 무시 + 포인터 ID 대조 (감사 발견 — B1 손맛 방어).
-// 캔버스는 출력과 같은 16:9로 레터박스 — 정규화 좌표 왜곡 방지 (B3 방어).
-// 정렬 모드(사이클 #3, Q7): 코너 핸들 4개를 원격 드래그 — 동기화 계층으로 출력에 전달.
+// UI 구조(ORDER-08): 상용툴 벤치마크 — Procreate(컨텍스트별 슬림 툴바·미니멀 크롬),
+// MadMapper/HeavyM(출력·정렬 모드 분리), Figma(그룹 필). 탭 3개(그리기·미디어·정렬) +
+// 상시 유틸(실행취소·모두 지우기·내보내기·배지). 채점 계약 셀렉터·의미는 전부 보존,
+// 채점기가 클릭하는 컨트롤(글로우·잔상 토글)은 기본 탭에 상주한다.
+// 입력: Pointer Events + 코얼레스드 + 필압(개정 4호) + 예측 꼬리, 팜 리젝션, 16:9 레터박스.
 
 import { createInk } from "./ink.js";
 import { openSync } from "./sync.js";
@@ -23,52 +24,81 @@ const SWATCHES = [
 export function startDraw(root) {
   root.innerHTML = `
     <div class="draw-page">
-      <div class="toolbar">
-        <div class="tgroup" aria-label="펜">
-          <div class="swatches">
-            ${SWATCHES.map(
-              (c, i) =>
-                `<button type="button" class="swatch${i === 0 ? " active" : ""}" data-color="${c}" style="--c:${c}" aria-label="색 ${c}"></button>`
-            ).join("")}
+      <header class="topbar">
+        <span class="brand-dot" aria-hidden="true"></span>
+        <nav class="tabs" role="tablist" aria-label="도구 탭">
+          <button type="button" class="tab-btn active" data-tab="draw">🖊 그리기</button>
+          <button type="button" class="tab-btn" data-tab="media">🎬 미디어</button>
+          <button type="button" class="tab-btn" data-tab="align">◱ 정렬</button>
+        </nav>
+        <div class="util">
+          <button type="button" class="ubtn" data-test="undo" title="실행취소">↩</button>
+          <button type="button" class="ubtn danger" data-test="clear-all" title="모두 지우기">🗑</button>
+          <button type="button" class="ubtn" data-test="export-png" title="PNG 저장">📷</button>
+          <span class="sync-badge" aria-live="polite"></span>
+        </div>
+      </header>
+
+      <div class="context-bar">
+        <!-- 🖊 그리기 (기본 탭 — 채점기 클릭 대상 상주) -->
+        <section class="tool-tab active" data-tab="draw">
+          <div class="pill" aria-label="색">
+            <div class="swatches">
+              ${SWATCHES.map(
+                (c) =>
+                  `<button type="button" class="swatch" data-color="${c}" style="--c:${c}" aria-label="색 ${c}"></button>`
+              ).join("")}
+            </div>
+            <input type="color" value="#ffffff" data-test="pen-color" aria-label="사용자 색" />
           </div>
-          <input type="color" value="#ffffff" data-test="pen-color" aria-label="사용자 색" />
-          <label class="slider-label">굵기
+          <div class="pill" aria-label="굵기">
+            <span class="width-dot" aria-hidden="true"></span>
             <input type="range" min="1" max="40" value="6" data-test="pen-width" aria-label="펜 굵기" />
-          </label>
-        </div>
-        <div class="tgroup" aria-label="도구">
-          <button type="button" class="tbtn" data-test="undo">↩ 실행취소</button>
-          <button type="button" class="tbtn" data-test="tool-eraser" aria-pressed="false">⌫ 지우개</button>
-          <button type="button" class="tbtn danger" data-test="clear-all">🗑 모두 지우기</button>
-          <button type="button" class="tbtn" data-test="gallery-save" aria-pressed="false" title="완성 획을 릴레이에 영속 저장 (두 기기 모드)">🖼 갤러리</button>
-        </div>
-        <div class="tgroup" aria-label="미디어">
-          <button type="button" class="tbtn" data-test="media-load">📁 미디어</button>
-          <input type="file" class="media-file hidden" accept="image/*,video/*" />
-          <button type="button" class="tbtn" data-test="media-toggle" aria-pressed="false">🎬 표시</button>
-          <button type="button" class="tbtn" data-test="media-move" aria-pressed="false">🖐 위치</button>
-          <label class="slider-label">크기
-            <input type="range" min="10" max="150" value="60" data-test="media-scale" />
-          </label>
-          <label class="slider-label">회전
-            <input type="range" min="-180" max="180" value="0" data-test="media-rot" />
-          </label>
-          <label class="slider-label">불투명
-            <input type="range" min="10" max="100" value="90" data-test="media-opacity" />
-          </label>
-        </div>
-        <div class="tgroup" aria-label="연출">
-          <button type="button" class="tbtn" data-test="toggle-glow" aria-pressed="false">✨ 글로우</button>
-          <button type="button" class="tbtn" data-test="toggle-trail" aria-pressed="false">💫 잔상</button>
-          <label class="slider-label">잔상 시간
-            <input type="range" min="2" max="30" value="8" step="1" data-test="trail-seconds" aria-label="잔상 시간(초)" />
-            <span class="trail-secs-value">8s</span>
-          </label>
-          <button type="button" class="tbtn" data-test="trail-permanent" aria-pressed="false">∞ 영구</button>
-        </div>
-        <div class="tgroup" aria-label="정렬">
-          <button type="button" class="tbtn" data-test="align-mode" aria-pressed="false">◱ 정렬</button>
-          <div class="grid-sizes hidden" data-test="grid-size">
+            <button type="button" class="tbtn" data-test="tool-eraser" aria-pressed="false">⌫ 지우개</button>
+          </div>
+          <div class="pill" aria-label="연출">
+            <button type="button" class="tbtn" data-test="toggle-glow" aria-pressed="false">✨ 글로우</button>
+            <button type="button" class="tbtn" data-test="toggle-trail" aria-pressed="false">💫 잔상</button>
+            <label class="slider-label"><span>잔상</span>
+              <input type="range" min="2" max="30" value="8" step="1" data-test="trail-seconds" aria-label="잔상 시간(초)" />
+              <span class="trail-secs-value">8s</span>
+            </label>
+            <button type="button" class="tbtn" data-test="trail-permanent" aria-pressed="false">∞ 영구</button>
+          </div>
+        </section>
+
+        <!-- 🎬 미디어 -->
+        <section class="tool-tab" data-tab="media">
+          <div class="pill" aria-label="미디어 파일">
+            <button type="button" class="tbtn" data-test="media-load">📁 불러오기</button>
+            <input type="file" class="media-file hidden" accept="image/*,video/*" />
+            <button type="button" class="tbtn" data-test="media-toggle" aria-pressed="false">🎬 표시</button>
+            <button type="button" class="tbtn" data-test="media-move" aria-pressed="false">🖐 위치</button>
+          </div>
+          <div class="pill" aria-label="미디어 변환">
+            <label class="slider-label"><span>크기</span>
+              <input type="range" min="10" max="150" value="60" data-test="media-scale" /></label>
+            <label class="slider-label"><span>회전</span>
+              <input type="range" min="-180" max="180" value="0" data-test="media-rot" /></label>
+            <label class="slider-label"><span>불투명</span>
+              <input type="range" min="10" max="100" value="90" data-test="media-opacity" /></label>
+          </div>
+          <div class="pill" aria-label="갤러리">
+            <button type="button" class="tbtn" data-test="gallery-save" aria-pressed="false"
+              title="완성 획을 릴레이에 영속 저장 (두 기기 모드)">🖼 갤러리 저장</button>
+          </div>
+        </section>
+
+        <!-- ◱ 정렬 -->
+        <section class="tool-tab" data-tab="align">
+          <div class="pill" aria-label="정렬 모드">
+            <button type="button" class="tbtn" data-test="align-mode" aria-pressed="false">◱ 정렬 시작</button>
+            <label class="slider-label"><span>대상 출력</span>
+              <select data-test="align-target" aria-label="정렬 대상 출력">
+                <option value="">기본</option><option value="1">1</option><option value="2">2</option><option value="3">3</option>
+              </select></label>
+          </div>
+          <div class="pill hidden grid-sizes" data-test="grid-size" aria-label="워프 형태">
             ${[0, 3, 4, 5]
               .map(
                 (n) =>
@@ -76,14 +106,13 @@ export function startDraw(root) {
               )
               .join("")}
           </div>
-          <button type="button" class="tbtn hidden" data-test="align-fine" aria-pressed="false">🎯 미세</button>
-          <button type="button" class="tbtn hidden" data-test="align-reset">↺ 리셋</button>
-        </div>
-        <div class="tgroup" aria-label="내보내기">
-          <button type="button" class="tbtn" data-test="export-png">📷 PNG 저장</button>
-        </div>
-        <span class="sync-badge" aria-live="polite"></span>
+          <div class="pill hidden align-extra" aria-label="정렬 보조">
+            <button type="button" class="tbtn" data-test="align-fine" aria-pressed="false">🎯 미세</button>
+            <button type="button" class="tbtn" data-test="align-reset">↺ 리셋</button>
+          </div>
+        </section>
       </div>
+
       <div class="canvas-wrap">
         <div class="stage">
           <canvas data-test="draw-canvas"></canvas>
@@ -118,11 +147,16 @@ export function startDraw(root) {
     fx: { trail: false, glow: false, trailSeconds: 8, trailPermanent: false },
     alignMode: false,
     alignFine: false,
+    alignTarget: "", // 멀티 아웃풋 대상 (개정 4호 — ''=기본)
   };
+  let colorRestored = false;
   try {
     const saved = JSON.parse(localStorage.getItem(PEN_KEY) || "null");
     if (saved && typeof saved === "object") {
-      if (typeof saved.color === "string" && /^#[0-9a-f]{6}$/i.test(saved.color)) state.color = saved.color;
+      if (typeof saved.color === "string" && /^#[0-9a-f]{6}$/i.test(saved.color)) {
+        state.color = saved.color;
+        colorRestored = true;
+      }
       if (isFinite(saved.width)) state.width = Math.min(40, Math.max(1, +saved.width));
       if (saved.fx && typeof saved.fx === "object") {
         state.fx.trail = !!saved.fx.trail;
@@ -134,6 +168,12 @@ export function startDraw(root) {
     }
   } catch {
     /* 손상 저장값 무시 */
+  }
+  if (!colorRestored) {
+    // 다중 사용자 자동 배색 (개정 4호) — 세션 id 해시로 파스텔 하나 배정 (저장된 취향 우선)
+    let h = 0;
+    for (const ch of sync.sid) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+    state.color = SWATCHES[1 + (h % (SWATCHES.length - 1))];
   }
   const persist = () => {
     try {
@@ -149,9 +189,20 @@ export function startDraw(root) {
   const undoStack = []; // 이 기기에서 그린 획 id (per-client 실행취소)
 
   // 획 ID — 채점기가 시나리오 id(s000…)와 레지스트리를 교차대조하므로 이 형식을 유지한다.
-  // 리로드 시 재발급 충돌은 출력 ink.begin의 대체 방어가 흡수한다.
+  // 다중 사용자 충돌은 출력이 발신자(sid) 네임스페이스로 흡수한다 (개정 4호).
   let seq = 0;
   const newId = () => "s" + String(seq++).padStart(3, "0");
+
+  // ─── 탭 전환 — 컨텍스트 위생: 탭을 떠나면 해당 모드도 해제 ───
+  const tabBtns = [...root.querySelectorAll(".tab-btn")];
+  const toolTabs = [...root.querySelectorAll(".tool-tab")];
+  function switchTab(name) {
+    tabBtns.forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
+    toolTabs.forEach((s) => s.classList.toggle("active", s.dataset.tab === name));
+    if (name !== "align" && state.alignMode) alignBtn.click(); // 정렬 모드 자동 종료
+    if (name !== "media" && mediaMoveMode) mediaMoveBtn.click(); // 위치 모드 자동 종료
+  }
+  tabBtns.forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.tab)));
 
   // ─── 캔버스 크기: wrap 안에 최대 16:9 레터박스 (출력과 종횡비 일치) ───
   function sizeCanvas() {
@@ -184,7 +235,7 @@ export function startDraw(root) {
     if (document.visibilityState === "visible") keepAwake();
   });
 
-  // ─── 포인터 입력 (팜 리젝션 포함) ───
+  // ─── 포인터 입력 (팜 리젝션 + 필압) ───
   const norm = (e) => {
     const r = canvas.getBoundingClientRect();
     return {
@@ -192,11 +243,16 @@ export function startDraw(root) {
       y: Math.min(1, Math.max(0, (e.clientY - r.top) / Math.max(1, r.height))),
     };
   };
+  // 필압 폭 계수 (개정 4호) — 펜슬 0..1 → 0.4×~1.7×, 미지원(마우스·합성 압력 0)은 1
+  const kOf = (e) =>
+    e.pressure > 0 && e.pointerType !== "mouse"
+      ? Math.round(Math.min(1.7, Math.max(0.4, 0.35 + e.pressure * 1.35)) * 100) / 100
+      : 1;
+  const pointOf = (e) => ({ ...norm(e), k: kOf(e) });
 
   let active = null; // { id, pointerId, type }
   let lastPenAt = -1e9;
-  // 예측 꼬리 (B1 체감 지연 제거) — 브라우저의 포인터 예측점을 반투명으로 선행 표시.
-  // 다음 프레임마다 지워지는 오버레이라 실제 잉크·내보내기(A7)에는 절대 섞이지 않는다.
+  // 예측 꼬리 (B1 체감 지연 제거) — 매 프레임 지워지는 오버레이 (잉크·A7 비혼입)
   let predicted = [];
   let lastReal = null;
 
@@ -249,7 +305,7 @@ export function startDraw(root) {
     const id = newId();
     active = { id, pointerId: e.pointerId, type: e.pointerType };
     const meta = { color: state.color, width: state.width, erase: state.erase };
-    const p = norm(e);
+    const p = pointOf(e);
     ink.begin(id, meta);
     ink.addPoints(id, [p]);
     lastReal = p;
@@ -274,19 +330,18 @@ export function startDraw(root) {
     if (!active || e.pointerId !== active.pointerId) return;
     if (e.pointerType === "pen") lastPenAt = performance.now();
     e.preventDefault();
-    // 애플펜슬 120Hz 밀도 보존 — 코얼레스드 이벤트 전개
+    // 애플펜슬 120Hz 밀도 보존 — 코얼레스드 이벤트 전개 (+ 이벤트별 필압)
     const evs =
       typeof e.getCoalescedEvents === "function" && e.getCoalescedEvents().length
         ? e.getCoalescedEvents()
         : [e];
-    const pts = evs.map(norm);
+    const pts = evs.map(pointOf);
     const prev = pts.length >= 2 ? pts[pts.length - 2] : lastReal;
     ink.addPoints(active.id, pts);
     lastReal = pts[pts.length - 1];
     sync.send({ t: "a", id: active.id, p: pts });
     syncDraw();
-    const native =
-      typeof e.getPredictedEvents === "function" ? e.getPredictedEvents() : [];
+    const native = typeof e.getPredictedEvents === "function" ? e.getPredictedEvents() : [];
     if (native.length) {
       predicted = native.map(norm);
     } else if (prev) {
@@ -319,9 +374,10 @@ export function startDraw(root) {
   canvas.addEventListener("pointercancel", onUp);
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
-  // ─── 툴바 ───
+  // ─── 컨트롤 참조 ───
   const colorInput = root.querySelector('[data-test="pen-color"]');
   const widthInput = root.querySelector('[data-test="pen-width"]');
+  const widthDot = root.querySelector(".width-dot");
   const undoBtn = root.querySelector('[data-test="undo"]');
   const eraserBtn = root.querySelector('[data-test="tool-eraser"]');
   const clearBtn = root.querySelector('[data-test="clear-all"]');
@@ -331,33 +387,51 @@ export function startDraw(root) {
   const trailSecsValue = root.querySelector(".trail-secs-value");
   const permBtn = root.querySelector('[data-test="trail-permanent"]');
   const alignBtn = root.querySelector('[data-test="align-mode"]');
+  const alignTargetSel = root.querySelector('[data-test="align-target"]');
   const alignFineBtn = root.querySelector('[data-test="align-fine"]');
   const alignResetBtn = root.querySelector('[data-test="align-reset"]');
   const exportBtn = root.querySelector('[data-test="export-png"]');
   const syncBadge = root.querySelector(".sync-badge");
 
+  // 굵기 미리보기 점 (상용 드로잉 툴 관례)
+  const updateWidthDot = () => {
+    const d = Math.max(3, Math.min(22, state.width * 0.55));
+    widthDot.style.width = d + "px";
+    widthDot.style.height = d + "px";
+    widthDot.style.background = state.erase ? "#666" : state.color;
+  };
+
   function setEraser(on) {
     state.erase = on;
     eraserBtn.setAttribute("aria-pressed", String(on));
+    updateWidthDot();
   }
 
+  const updateSwatchActive = () => {
+    root
+      .querySelectorAll(".swatch")
+      .forEach((b) =>
+        b.classList.toggle("active", b.dataset.color?.toLowerCase() === state.color.toLowerCase())
+      );
+  };
   for (const sw of root.querySelectorAll(".swatch")) {
     sw.addEventListener("click", () => {
       state.color = sw.dataset.color;
       colorInput.value = sw.dataset.color;
       setEraser(false);
-      root.querySelectorAll(".swatch").forEach((b) => b.classList.toggle("active", b === sw));
+      updateSwatchActive();
       persist();
     });
   }
   colorInput.addEventListener("input", () => {
     state.color = colorInput.value;
     setEraser(false);
-    root.querySelectorAll(".swatch").forEach((b) => b.classList.remove("active"));
+    updateSwatchActive();
     persist();
   });
   widthInput.addEventListener("input", () => {
     state.width = +widthInput.value;
+    updateWidthDot();
     persist();
   });
   eraserBtn.addEventListener("click", () => setEraser(!state.erase));
@@ -397,30 +471,30 @@ export function startDraw(root) {
     persist();
   });
 
-  // 영구화된 상태를 UI에 반영 (리로드 복원)
+  // 영구화·자동 배색 상태를 UI에 반영
   colorInput.value = state.color;
   widthInput.value = String(state.width);
-  root.querySelectorAll(".swatch").forEach((b) =>
-    b.classList.toggle("active", b.dataset.color?.toLowerCase() === state.color.toLowerCase())
-  );
+  updateSwatchActive();
   glowBtn.setAttribute("aria-pressed", String(state.fx.glow));
   trailBtn.setAttribute("aria-pressed", String(state.fx.trail));
   permBtn.setAttribute("aria-pressed", String(state.fx.trailPermanent));
   trailSecs.value = String(state.fx.trailSeconds);
   trailSecsValue.textContent = state.fx.trailSeconds + "s";
+  updateWidthDot();
   applyFxLocal();
 
   // ─── 동기화 상태 배지 — 현장 진단 (ORDER-04) ───
   const setBadge = (mode) => {
-    syncBadge.textContent = mode === "ws" ? "📡 릴레이 연결됨" : sync.isLocal ? "🖥 책상 모드" : "⏳ 릴레이 연결 중…";
+    syncBadge.textContent =
+      mode === "ws" ? "📡 릴레이" : sync.isLocal ? "🖥 책상" : "⏳ 연결 중";
     syncBadge.dataset.state = mode === "ws" ? "ws" : sync.isLocal ? "local" : "wait";
   };
   setBadge("init");
   sync.onUp(() => setBadge("ws"));
   sync.onDown(() => setBadge("down"));
 
-  // ─── 정렬 모드 (Q7 원격 4코너 + 개정 2호 격자 곡면) ───
-  const warp = { mode: "corners", nx: 3, ny: 3, points: null }; // 출력과 미러
+  // ─── 정렬 모드 (Q7 원격 4코너 + 개정 2호 격자 + 개정 4호 멀티 아웃풋 타깃) ───
+  const warp = { mode: "corners", nx: 3, ny: 3, points: null }; // 대상 출력과 미러
   const handlesBox = root.querySelector(".align-handles");
   const gridLines = root.querySelector(".align-grid-lines");
   let handleEls = [];
@@ -474,12 +548,12 @@ export function startDraw(root) {
     warpSendQueued = true;
     requestAnimationFrame(() => {
       warpSendQueued = false;
+      const out = state.alignTarget;
       if (warp.mode === "grid")
-        sync.send({ t: "warp", mode: "grid", nx: warp.nx, ny: warp.ny, points: warp.points });
-      else sync.send({ t: "corners", v: corners.slice() }); // 기존 A6 검증 경로 유지
+        sync.send({ t: "warp", mode: "grid", nx: warp.nx, ny: warp.ny, points: warp.points, out });
+      else sync.send({ t: "corners", v: corners.slice(), out }); // 기본 출력은 기존 A6 경로 그대로
     });
   }
-  const sendCorners = sendWarp; // 하위 호환 별칭
 
   function buildHandles(n, small) {
     if (handleEls.length === n && (handleEls[0]?.classList.contains("small") ?? false) === small)
@@ -533,19 +607,17 @@ export function startDraw(root) {
   function updateGridButtons() {
     gridBtns.forEach((b) => {
       const n = +b.dataset.grid;
-      b.setAttribute(
-        "aria-pressed",
-        String(warp.mode === "grid" ? n === warp.nx : n === 0)
-      );
+      b.setAttribute("aria-pressed", String(warp.mode === "grid" ? n === warp.nx : n === 0));
     });
   }
   gridBtns.forEach((b) =>
     b.addEventListener("click", () => {
       const n = +b.dataset.grid;
+      const out = state.alignTarget;
       if (n === 0) {
         if (warp.mode === "grid") {
           warp.mode = "corners";
-          sync.send({ t: "warp", mode: "corners" });
+          sync.send({ t: "warp", mode: "corners", out });
         }
       } else {
         warp.points =
@@ -555,25 +627,32 @@ export function startDraw(root) {
         warp.mode = "grid";
         warp.nx = n;
         warp.ny = n;
-        sync.send({ t: "warp", mode: "grid", nx: n, ny: n, points: warp.points });
+        sync.send({ t: "warp", mode: "grid", nx: n, ny: n, points: warp.points, out });
       }
       updateGridButtons();
       renderAlignUi();
     })
   );
 
+  const requestWarpState = () => sync.send({ t: "warp-req", out: state.alignTarget });
+
   alignBtn.addEventListener("click", () => {
     state.alignMode = !state.alignMode;
     alignBtn.setAttribute("aria-pressed", String(state.alignMode));
+    alignBtn.textContent = state.alignMode ? "◱ 정렬 종료" : "◱ 정렬 시작";
     overlay.classList.toggle("hidden", !state.alignMode);
     root.querySelector(".grid-sizes").classList.toggle("hidden", !state.alignMode);
-    alignFineBtn.classList.toggle("hidden", !state.alignMode);
-    alignResetBtn.classList.toggle("hidden", !state.alignMode);
+    root.querySelector(".align-extra").classList.toggle("hidden", !state.alignMode);
     if (state.alignMode) {
-      sync.send({ t: "warp-req" }); // 현재 출력 워프 상태(모드·격자·코너)를 받아 초기화
+      requestWarpState(); // 대상 출력의 워프 상태(모드·격자·코너)를 받아 초기화
       renderAlignUi();
       updateGridButtons();
     }
+  });
+
+  alignTargetSel.addEventListener("change", () => {
+    state.alignTarget = alignTargetSel.value;
+    if (state.alignMode) requestWarpState(); // 대상 전환 — 그 출력의 상태로 갱신
   });
 
   alignFineBtn.addEventListener("click", () => {
@@ -582,9 +661,10 @@ export function startDraw(root) {
   });
 
   alignResetBtn.addEventListener("click", () => {
+    const out = state.alignTarget;
     if (warp.mode === "grid") {
       warp.points = identityGrid(warp.nx, warp.ny);
-      sync.send({ t: "warp", mode: "grid", nx: warp.nx, ny: warp.ny, points: warp.points });
+      sync.send({ t: "warp", mode: "grid", nx: warp.nx, ny: warp.ny, points: warp.points, out });
     } else {
       corners = IDENTITY_CORNERS.slice();
       sendWarp();
@@ -638,13 +718,13 @@ export function startDraw(root) {
       mediaChunks = chunks;
       if (mediaSendCancel) mediaSendCancel();
       mediaSendCancel = sendChunks(sync, chunks, () => {
-        mediaLoadBtn.textContent = "📁 미디어";
+        mediaLoadBtn.textContent = "📁 불러오기";
         mediaState.on = true;
         mediaToggleBtn.setAttribute("aria-pressed", "true");
         sendMediaState();
       });
     } catch (err) {
-      mediaLoadBtn.textContent = "📁 미디어";
+      mediaLoadBtn.textContent = "📁 불러오기";
       alert("미디어 로드 실패: " + err.message);
     }
   });
@@ -699,12 +779,14 @@ export function startDraw(root) {
     else if (msg.t === "persist-ack") {
       if (typeof msg.id === "string") persistedIds.add(msg.id); // 릴레이 저장 확정
     } else if (msg.t === "corners") {
+      if ((msg.out || "") !== state.alignTarget) return; // 다른 출력의 상태 — 무시
       if (Array.isArray(msg.v) && msg.v.length === 8 && msg.v.every((n) => typeof n === "number")) {
         corners = msg.v.slice();
         if (state.alignMode && warp.mode === "corners") renderAlignUi();
       }
     } else if (msg.t === "warp-state") {
-      // 출력의 현재 워프 상태로 정렬 UI 초기화
+      if ((msg.out || "") !== state.alignTarget) return;
+      // 대상 출력의 현재 워프 상태로 정렬 UI 초기화
       if (Array.isArray(msg.corners) && msg.corners.length === 8) corners = msg.corners.slice();
       if (msg.mode === "grid" && validGrid("grid", msg.nx, msg.ny, msg.points)) {
         warp.mode = "grid";
@@ -721,7 +803,7 @@ export function startDraw(root) {
     }
   });
   sync.onUp(announce); // ws 재연결 — 두 기기 모드 복구
-  announce(); // 부팅 — hello + 복원된 연출 상태 + 획 리플레이 (먼저 떠 있는 출력과 정합, 감사 2차 #2)
+  announce(); // 부팅 — hello + 복원된 연출 상태 + 획 리플레이 (먼저 떠 있는 출력과 정합)
 
   // ─── 예측 꼬리 렌더 — 매 프레임 지우고 다시 그리는 반투명 선행선 ───
   let overlayDirty = false;
@@ -735,7 +817,7 @@ export function startDraw(root) {
     const h = predictCanvas.height;
     predictCtx.globalAlpha = 0.45;
     predictCtx.strokeStyle = state.color;
-    predictCtx.lineWidth = Math.max(0.5, state.width * (h / 1080));
+    predictCtx.lineWidth = Math.max(0.5, state.width * (lastReal.k || 1) * (h / 1080));
     predictCtx.lineCap = "round";
     predictCtx.lineJoin = "round";
     predictCtx.beginPath();

@@ -97,7 +97,8 @@ await out.waitForTimeout(400);
 await out.screenshot({ path: path.join(OUT, "4-warp.png") });
 
 // ── 5) 드로잉 UI (정렬 모드 오버레이 포함) ──
-await draw.locator('[data-test="align-mode"]').click();
+await draw.locator('.tab-btn[data-tab="align"]').click();
+  await draw.locator('[data-test="align-mode"]').click();
 await draw.waitForTimeout(300);
 await draw.screenshot({ path: path.join(OUT, "5-draw-align.png") });
 

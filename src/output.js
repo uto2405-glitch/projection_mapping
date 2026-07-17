@@ -418,14 +418,20 @@ export function startOutput(root) {
             if (!s || !Array.isArray(s.points)) continue;
             const key = `${msg._sid || "x"}:${s.id}`;
             if (ink.pointCount(key) >= s.points.length) continue;
-            // 갤러리 리플레이라도 라이브 원본을 이미 들고 있으면 중복 등록 금지
+            // 갤러리 리플레이 ↔ 드로어 리플레이 양방향 중복 가드 (감사 4차 #5)
             if (
               s.srcSid &&
               s.srcId &&
               ink.pointCount(`${s.srcSid}:${s.srcId}`) >= s.points.length
             )
-              continue;
-            ink.begin(key, { color: s.color, width: s.width, erase: s.erase }, s.srcId || s.id);
+              continue; // 갤러리 사본인데 라이브 원본 보유
+            if (
+              !s.srcSid &&
+              ink.pointCount(`relay-gallery:${msg._sid || "x"}:${s.id}`) >= s.points.length
+            )
+              continue; // 드로어 리플레이인데 갤러리 사본 보유 (persist-ack 유실 케이스)
+            // 부분본 → 완성본 승격이면 옛 세대를 완전 대체 (유령 부활 차단)
+            ink.begin(key, { color: s.color, width: s.width, erase: s.erase }, s.srcId || s.id, true);
             ink.addPoints(key, s.points);
             if (s.done) ink.end(key);
           }
@@ -439,7 +445,14 @@ export function startOutput(root) {
         glowForce = true;
         break;
       case "fx":
-        Object.assign(effects, msg.fx);
+        // 알려진 키만 형 검증·클램프해 수용 — 레지스트리(C4)와 렌더 상태 정합 보장
+        if (msg.fx && typeof msg.fx === "object") {
+          effects.trail = !!msg.fx.trail;
+          effects.glow = !!msg.fx.glow;
+          effects.trailPermanent = !!msg.fx.trailPermanent;
+          const ts = Number(msg.fx.trailSeconds);
+          effects.trailSeconds = Math.min(30, Math.max(2, isFinite(ts) ? ts : effects.trailSeconds));
+        }
         fx.setGlow(effects.glow);
         warpMat.uniforms.uGlowOn.value = effects.glow ? 1 : 0;
         ink.setFade(effects);

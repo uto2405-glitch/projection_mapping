@@ -936,6 +936,35 @@ SC.S26 = async () => {
   await ctx.close();
 };
 
+// ─── S27 다중 사용자 clear 정합 (감사 4차 #2) — 지운 작품이 리플레이로 부활 금지 ───
+SC.S27 = async () => {
+  const { ctx, draw, out, errors } = await setup();
+  const draw2 = await ctx.newPage();
+  await draw2.goto(`${BASE}/?role=draw`, { waitUntil: "domcontentloaded" });
+  await draw2.waitForTimeout(300);
+  await fireStroke(draw, line(0.2, 0.3, 0.8, 0.3)); // A의 획
+  await fireStroke(draw2, line(0.2, 0.7, 0.8, 0.7)); // B의 획
+  await out.waitForTimeout(400);
+  await click(draw, "clear-all"); // A가 세션 교체
+  await draw2.waitForTimeout(400);
+  // B의 로컬 미리보기도 소거돼야 함
+  const bLocal = await draw2.evaluate(() => {
+    const c = document.querySelector('[data-test="draw-canvas"]');
+    const g = c.getContext("2d").getImageData(0, Math.floor(c.height * 0.7), c.width, 1).data;
+    let lit = 0;
+    for (let i = 0; i < g.length; i += 4) if (g[i] > 40) lit++;
+    return lit;
+  });
+  // 출력 리로드 → 양쪽 announce 리플레이 — 지운 획이 부활하면 안 됨
+  await out.reload({ waitUntil: "domcontentloaded" });
+  await out.waitForTimeout(800);
+  const png = await shot(out);
+  const reg = await out.evaluate(() => window.__ldp.strokes.length);
+  const stillClear = lum(png, 0.5, 0.3) < 6 && lum(png, 0.5, 0.7) < 6 && reg === 0;
+  report("S27", "다중 사용자 clear 정합 (부활 금지)", bLocal === 0 && stillClear, `B로컬소거=${bLocal === 0} 부활없음=${stillClear} reg=${reg}`, errors);
+  await ctx.close();
+};
+
 // ─── 실행 ───
 for (const [id, fn] of Object.entries(SC)) {
   if (only && !only.includes(id)) continue;

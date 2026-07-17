@@ -201,6 +201,7 @@ export function startDraw(root) {
     toolTabs.forEach((s) => s.classList.toggle("active", s.dataset.tab === name));
     if (name !== "align" && state.alignMode) alignBtn.click(); // 정렬 모드 자동 종료
     if (name !== "media" && mediaMoveMode) mediaMoveBtn.click(); // 위치 모드 자동 종료
+    requestAnimationFrame(sizeCanvas); // 컨텍스트 바 높이 변화 반영
   }
   tabBtns.forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.tab)));
 
@@ -647,7 +648,12 @@ export function startDraw(root) {
       requestWarpState(); // 대상 출력의 워프 상태(모드·격자·코너)를 받아 초기화
       renderAlignUi();
       updateGridButtons();
+    } else {
+      // 진행 중 드래그(포인터 캡처)까지 정리 — 숨겨진 채 조작되는 일 방지
+      handlesBox.innerHTML = "";
+      handleEls = [];
     }
+    requestAnimationFrame(sizeCanvas);
   });
 
   alignTargetSel.addEventListener("change", () => {
@@ -776,7 +782,30 @@ export function startDraw(root) {
   sync.on((msg) => {
     if (!msg) return;
     if (msg.t === "sync-req") announce(); // 출력(재)부팅 — 연출 상태 + 획 리플레이 복구
-    else if (msg.t === "persist-ack") {
+    else if (msg.t === "clear") {
+      // 다중 사용자 정합 (감사 4차 #2) — 다른 클라이언트의 세션 교체를 로컬에도 반영.
+      // 미반영 시 이쪽 announce 리플레이가 지운 작품을 출력에 부활시킨다.
+      ink.clear();
+      undoStack.length = 0;
+      persistedIds.clear();
+    } else if (msg.t === "fx") {
+      // fx 전역 미러 (감사 4차 #3) — 마지막 조작자의 상태로 전 클라이언트 수렴.
+      // 미러 없이는 각자의 announce가 스테일 fx를 재강제해 출력이 핑퐁한다.
+      if (msg.fx && typeof msg.fx === "object") {
+        state.fx.trail = !!msg.fx.trail;
+        state.fx.glow = !!msg.fx.glow;
+        state.fx.trailPermanent = !!msg.fx.trailPermanent;
+        const ts = Number(msg.fx.trailSeconds);
+        if (isFinite(ts)) state.fx.trailSeconds = Math.min(30, Math.max(2, ts));
+        glowBtn.setAttribute("aria-pressed", String(state.fx.glow));
+        trailBtn.setAttribute("aria-pressed", String(state.fx.trail));
+        permBtn.setAttribute("aria-pressed", String(state.fx.trailPermanent));
+        trailSecs.value = String(state.fx.trailSeconds);
+        trailSecsValue.textContent = state.fx.trailSeconds + "s";
+        applyFxLocal();
+        persist();
+      }
+    } else if (msg.t === "persist-ack") {
       if (typeof msg.id === "string") persistedIds.add(msg.id); // 릴레이 저장 확정
     } else if (msg.t === "corners") {
       if ((msg.out || "") !== state.alignTarget) return; // 다른 출력의 상태 — 무시

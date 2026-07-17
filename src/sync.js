@@ -31,7 +31,9 @@ export function openSync() {
       if (pendingCritical[i].qt < cutoff) pendingCritical.splice(i, 1);
     for (const item of pendingCritical) {
       try {
-        ws.send(JSON.stringify(item.env));
+        // 순번 재스탬프 — 원래 _n으로 보내면 그 사이 라이브 순번을 본 수신자가
+        // '이미 수신'으로 오판해 영구 폐기한다 (감사 4차 #4). undo는 멱등이라 안전.
+        ws.send(JSON.stringify({ ...item.env, _n: ++seq }));
       } catch {
         break; // 전송 실패 — 다음 기회에
       }

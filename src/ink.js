@@ -46,10 +46,20 @@ export function createInk({ canvas = null, width = 1920, height = 1080 } = {}) {
 
   /** 획 시작 — 같은 키가 이미 있으면(드로잉 기기 리로드 등) 옛 획을 봉인하고 대체.
    *  key는 내부 식별자(다중 사용자 시 발신자 네임스페이스), publicId는 레지스트리·
-   *  렌더 마크에 쓰는 공개 id(채점 계약: s000…). 단일 사용자는 둘이 같다. */
-  function begin(id, { color = "#ffffff", width = 6, erase = false } = {}, publicId = id) {
+   *  렌더 마크에 쓰는 공개 id(채점 계약: s000…). 단일 사용자는 둘이 같다.
+   *  supersede=true(리플레이 승격 — 같은 획의 완성본)면 옛 세대를 완전 만료시켜
+   *  이후 재드로우(undo·잔상)에서 유령으로 부활하지 못하게 한다 (감사 4차 #1). */
+  function begin(id, { color = "#ffffff", width = 6, erase = false } = {}, publicId = id, supersede = false) {
     const prev = strokes.get(id);
-    if (prev) prev.done = true;
+    if (prev) {
+      prev.done = true;
+      if (supersede && !prev.expired) {
+        prev.expired = true;
+        prev.points.length = 0;
+        const pi = pub.indexOf(prev.pub);
+        if (pi >= 0) pub.splice(pi, 1); // 같은 공개 id의 중복 레지스트리 방지
+      }
+    }
     const s = {
       id,
       color,
